@@ -94,30 +94,37 @@ async def add_card(
     pool, chat_id, bitrix_task_id, alias, added_by, last_history_id, last_message_id
 ) -> str:
     async with pool.acquire() as conn, conn.transaction():
-        existing = await conn.fetchrow(
-            "SELECT id, active FROM cards WHERE bitrix_task_id = $1 AND chat_id = $2",
-            bitrix_task_id, chat_id,
-        )
-        if existing and existing["active"]:
-            return "exists"
-        if existing:  # реактивация: курсор заново от текущего максимума (§5)
-            await conn.execute("UPDATE cards SET active = TRUE WHERE id = $1", existing["id"])
-            await conn.execute(
-                "UPDATE cursors SET last_history_id=$3, last_message_id=$4, updated_at=now() "
-                "WHERE bitrix_task_id=$1 AND chat_id=$2",
-                bitrix_task_id, chat_id, last_history_id, last_message_id,
-            )
-            return "reactivated"
-        await conn.execute(
-            "INSERT INTO cards (bitrix_task_id, chat_id, alias, added_by) VALUES ($1,$2,$3,$4)",
+        # Try to insert; if conflict, DO NOTHING returns None
+        inserted = await conn.fetchrow(
+            "INSERT INTO cards (bitrix_task_id, chat_id, alias, added_by) VALUES ($1,$2,$3,$4) "
+            "ON CONFLICT (bitrix_task_id, chat_id) DO NOTHING RETURNING id",
             bitrix_task_id, chat_id, alias, added_by,
         )
+        if inserted:
+            # New card was inserted
+            await conn.execute(
+                "INSERT INTO cursors (bitrix_task_id, chat_id, last_history_id, last_message_id) "
+                "VALUES ($1,$2,$3,$4)",
+                bitrix_task_id, chat_id, last_history_id, last_message_id,
+            )
+            return "added"
+
+        # Card already exists; check if active and handle reactivation
+        existing = await conn.fetchrow(
+            "SELECT id, active FROM cards WHERE bitrix_task_id = $1 AND chat_id = $2 FOR UPDATE",
+            bitrix_task_id, chat_id,
+        )
+        if existing["active"]:
+            return "exists"
+
+        # Reactivate and reinitialize cursor
+        await conn.execute("UPDATE cards SET active = TRUE WHERE id = $1", existing["id"])
         await conn.execute(
-            "INSERT INTO cursors (bitrix_task_id, chat_id, last_history_id, last_message_id) "
-            "VALUES ($1,$2,$3,$4)",
+            "UPDATE cursors SET last_history_id=$3, last_message_id=$4, updated_at=now() "
+            "WHERE bitrix_task_id=$1 AND chat_id=$2",
             bitrix_task_id, chat_id, last_history_id, last_message_id,
         )
-        return "added"
+        return "reactivated"
 
 
 async def deactivate_card(pool, chat_id: int, bitrix_task_id: int) -> bool:
