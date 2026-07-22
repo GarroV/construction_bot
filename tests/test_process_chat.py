@@ -1,0 +1,236 @@
+"""Ядро оркестрации против реального process_chat/tick — repo/collector/llm замоканы."""
+import datetime as dt
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+from src.bitrix.links import FileLink  # noqa: F401  (для будущих дельт с файлами)
+from src.digest import llm, scheduler
+from src.digest.llm import CardDelta
+from src.i18n import load_locales
+from src.repo import CardRow, ChatRow, CursorRow
+from src.telegram.send import SendResult
+
+UTC = dt.timezone.utc
+LOCALES = load_locales()
+PROMPT = llm.load_prompt()
+
+CARD = CardRow(id=1, bitrix_task_id=8017, chat_id=1, alias="Бишкек 8", active=True)
+CARD2 = CardRow(id=2, bitrix_task_id=8018, chat_id=1, alias="Бишкек 9", active=True)
+CUR = CursorRow(bitrix_task_id=8017, chat_id=1, last_history_id=20, last_message_id=200)
+DELTA_WITH_CHANGES = CardDelta(
+    task_id=8017, alias="Бишкек 8", task_changes=["статус: 2 → 5"], comments=[],
+    checklist_done=3, checklist_total=10, files=[], new_history_id=31, new_message_id=202,
+)
+DELTA_EMPTY = CardDelta(
+    task_id=8017, alias="Бишкек 8", task_changes=[], comments=[],
+    checklist_done=0, checklist_total=0, files=[], new_history_id=20, new_message_id=200,
+)
+DELTA_EMPTY_2 = CardDelta(
+    task_id=8018, alias="Бишкек 9", task_changes=[], comments=[],
+    checklist_done=0, checklist_total=0, files=[], new_history_id=5, new_message_id=50,
+)
+
+
+def make_chat(**over) -> ChatRow:
+    base = dict(
+        id=1, country="Кыргызстан", telegram_chat_id=-100, message_thread_id=7,
+        digest_language="ru", digest_time=dt.time(9, 0), timezone="UTC",
+        last_digest_date=None, last_posted_at=None, last_ping_at=None,
+        restricted=False, active=True, created_at=dt.datetime(2026, 7, 1, tzinfo=UTC),
+    )
+    base.update(over)
+    return ChatRow(**base)
+
+
+def make_deps(send_fn, **settings_over) -> scheduler.Deps:
+    settings = SimpleNamespace(
+        bitrix_webhook_url="https://portal.example.com/rest/1/token/",
+        openai_model="gpt-5-mini",
+        weekly_ping_days=7,
+        admin_chat_id=None,
+    )
+    for k, v in settings_over.items():
+        setattr(settings, k, v)
+    return scheduler.Deps(
+        pool=object(),
+        bx=SimpleNamespace(webhook_user_id=1),
+        bot=object(),
+        llm_client=object(),
+        locales=LOCALES,
+        settings=settings,
+        prompt_template=PROMPT,
+        send_fn=send_fn,
+    )
+
+
+def patch_repo(monkeypatch, *, cards=None, cursor=CUR):
+    mocks = SimpleNamespace(
+        list_active_cards=AsyncMock(return_value=cards or []),
+        get_cursor=AsyncMock(return_value=cursor),
+        mark_digest_run=AsyncMock(),
+        mark_posted=AsyncMock(),
+        mark_ping=AsyncMock(),
+        advance_cursor=AsyncMock(),
+        update_chat_telegram_id=AsyncMock(),
+        deactivate_chat=AsyncMock(),
+    )
+    for name, mock in vars(mocks).items():
+        monkeypatch.setattr(scheduler.repo, name, mock)
+    return mocks
+
+
+async def test_marks_run_even_when_send_raises(monkeypatch):
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_WITH_CHANGES))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+
+    send_fn = AsyncMock(side_effect=RuntimeError("boom"))
+    deps = make_deps(send_fn)
+
+    # чат создан 2026-07-01: держим прогон в пределах недели, чтобы не задеть ветку пинга
+    errors = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert errors  # ошибка попала в сводку, а не улетела исключением
+    assert send_fn.await_count == 1
+    assert repo_mocks.mark_digest_run.await_count == 1
+    repo_mocks.advance_cursor.assert_not_awaited()
+
+
+async def test_cursor_advances_only_on_ok(monkeypatch):
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_WITH_CHANGES))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    now = dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC)  # в пределах недели — пинг не мешает
+
+    send_fn = AsyncMock(return_value=SendResult(ok=False))
+    deps = make_deps(send_fn)
+
+    errors = await scheduler.process_chat(deps, chat, now)
+    assert errors
+    repo_mocks.advance_cursor.assert_not_awaited()
+    repo_mocks.mark_posted.assert_not_awaited()
+
+    repo_mocks.advance_cursor.reset_mock()
+    repo_mocks.mark_posted.reset_mock()
+    send_fn.return_value = SendResult(ok=True)
+
+    await scheduler.process_chat(deps, chat, now)
+    repo_mocks.advance_cursor.assert_awaited_once_with(deps.pool, 8017, chat.id, 31, 202)
+    repo_mocks.mark_posted.assert_awaited_once_with(deps.pool, chat.id)
+
+
+async def test_forbidden_deactivates_and_marks_run(monkeypatch):
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_WITH_CHANGES))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    send_fn = AsyncMock(return_value=SendResult(ok=False, forbidden=True))
+    deps = make_deps(send_fn)
+
+    errors = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    repo_mocks.deactivate_chat.assert_awaited_once_with(deps.pool, chat.id)
+    assert any("выкинут" in e for e in errors)
+    assert repo_mocks.mark_digest_run.await_count == 1
+
+
+async def test_migrated_updates_chat_id(monkeypatch):
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_WITH_CHANGES))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    send_fn = AsyncMock(return_value=SendResult(ok=True, migrated_to=-200))
+    deps = make_deps(send_fn)
+
+    await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    repo_mocks.update_chat_telegram_id.assert_awaited_once_with(deps.pool, chat.id, -200)
+
+
+async def test_empty_chat_sends_nothing(monkeypatch):
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_EMPTY))
+    summarize_mock = AsyncMock(return_value="ок")
+    monkeypatch.setattr(scheduler.llm, "summarize", summarize_mock)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    # чат создан 2026-07-01, прогон на следующий день — пинг ещё не наступил (§7 п.5)
+    await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    send_fn.assert_not_awaited()
+    summarize_mock.assert_not_awaited()
+    assert repo_mocks.mark_digest_run.await_count == 1
+    repo_mocks.mark_posted.assert_not_awaited()
+
+
+async def test_ping_after_quiet_week(monkeypatch):
+    chat = make_chat(last_posted_at=dt.datetime(2026, 7, 10, tzinfo=UTC))
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_EMPTY))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    now = dt.datetime(2026, 7, 21, 4, 0, tzinfo=UTC)  # 11 дней тишины >= weekly_ping_days=7
+    await scheduler.process_chat(deps, chat, now)
+
+    send_fn.assert_awaited_once()
+    text = send_fn.await_args.args[3]
+    assert "2026-07-10" in text
+    repo_mocks.mark_ping.assert_awaited_once_with(deps.pool, chat.id)
+    repo_mocks.mark_posted.assert_not_awaited()
+
+
+async def test_mixed_chat_renders_no_changes_line(monkeypatch):
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD, CARD2])
+
+    async def fake_collect(bx, card, cursor):
+        return DELTA_WITH_CHANGES if card.bitrix_task_id == 8017 else DELTA_EMPTY_2
+
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", fake_collect)
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert send_fn.await_count == 2
+    first_text = send_fn.await_args_list[0].args[3]
+    second_text = send_fn.await_args_list[1].args[3]
+    assert "ок" in first_text
+    assert "изменений нет" in second_text
+    repo_mocks.mark_posted.assert_awaited_once_with(deps.pool, chat.id)
+
+
+async def test_tick_isolates_chat_errors_and_reports_admin(monkeypatch):
+    chat1 = make_chat(id=1, telegram_chat_id=-100)
+    chat2 = make_chat(id=2, telegram_chat_id=-200, country="Казахстан")
+    monkeypatch.setattr(scheduler.repo, "list_active_chats", AsyncMock(return_value=[chat1, chat2]))
+
+    async def fake_process_chat(deps_arg, chat_arg, now_arg):
+        if chat_arg.id == chat1.id:
+            raise RuntimeError("boom1")
+        return ["ошибка X"]
+
+    monkeypatch.setattr(scheduler, "process_chat", fake_process_chat)
+
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn, admin_chat_id=42)
+
+    now = dt.datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
+    await scheduler.tick(deps, now)
+
+    send_fn.assert_awaited_once()
+    args = send_fn.await_args.args
+    assert args[1] == 42
+    assert "ошибк" in args[3].lower()
