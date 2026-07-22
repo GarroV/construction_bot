@@ -19,3 +19,8 @@ def test_missing_key_returns_key():
 def test_ru_and_en_have_same_keys():
     locales = load_locales()
     assert set(locales["ru"]) == set(locales["en"])
+
+
+def test_key_missing_in_lang_falls_back_to_en_value():
+    locales = {"ru": {"other": "x"}, "en": {"foo": "Hello {name}"}}
+    assert t(locales, "ru", "foo", name="World") == "Hello World"
