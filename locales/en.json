@@ -1,0 +1,21 @@
+{
+  "add_ok": "Now tracking: {alias} (#{task_id})",
+  "add_exists": "Card #{task_id} is already tracked in this topic",
+  "add_reactivated": "Tracking again: {alias} (#{task_id})",
+  "add_not_found": "Task #{task_id} not found or no access",
+  "add_usage": "Usage: /add <card id>, e.g. /add 8017",
+  "remove_ok": "Stopped tracking card #{task_id}",
+  "remove_not_tracked": "Card #{task_id} is not tracked in this topic",
+  "remove_usage": "Usage: /remove <card id>",
+  "list_header": "Tracked cards:",
+  "list_empty": "Nothing is tracked in this topic yet. Add a card: /add <id>",
+  "lang_ok": "Digest language: {code}",
+  "lang_usage": "Usage: /lang <language code>, e.g. /lang en",
+  "time_ok": "Digest will arrive at {time} ({tz})",
+  "time_usage": "Usage: /time <HH:MM> <timezone>, e.g. /time 09:00 Asia/Bishkek",
+  "time_need_tz": "Please set a timezone: /time {time} Asia/Bishkek — otherwise UTC is used",
+  "no_changes": "no changes",
+  "weekly_ping": "No construction updates since {date}",
+  "fallback_notice": "⚠️ Short version without summary (processing failure):",
+  "restricted_denied": "Commands in this chat are admin-only"
+}
