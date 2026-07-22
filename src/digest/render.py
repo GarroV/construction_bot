@@ -5,7 +5,7 @@ from src.i18n import t
 
 
 def card_message(delta: CardDelta, summary: str | None, task_url: str, locales, lang: str) -> str:
-    header = f'<b><a href="{task_url}">{html.escape(delta.alias)}</a></b>'
+    header = f'<b><a href="{html.escape(task_url, quote=True)}">{html.escape(delta.alias)}</a></b>'
     lines = [header]
     if summary is not None:
         lines.append(html.escape(summary.strip()))
@@ -16,12 +16,12 @@ def card_message(delta: CardDelta, summary: str | None, task_url: str, locales, 
         lines.append(f"✔ {delta.checklist_done}/{delta.checklist_total}")
     for f in delta.files:
         name = html.escape(f.name)
-        lines.append(f'📎 <a href="{f.url}">{name}</a>' if f.url else f"📎 {name}")
+        lines.append(f'📎 <a href="{html.escape(f.url, quote=True)}">{name}</a>' if f.url else f"📎 {name}")
     return clip("\n".join(lines))
 
 
 def no_changes_line(alias: str, task_url: str, locales, lang: str) -> str:
-    return (f'<b><a href="{task_url}">{html.escape(alias)}</a></b> — '
+    return (f'<b><a href="{html.escape(task_url, quote=True)}">{html.escape(alias)}</a></b> — '
             f"{t(locales, lang, 'no_changes')}")
 
 

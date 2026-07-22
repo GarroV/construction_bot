@@ -41,3 +41,15 @@ def test_clip_cuts_on_line_boundary():
     assert len(clipped) <= 1000 and clipped.endswith("…")
     assert text.startswith(body)
     assert text[len(body)] == "\n"  # срез ровно по границе строки, тег/строка не разорваны
+
+
+def test_urls_are_attribute_escaped():
+    delta = CardDelta(
+        task_id=1, alias="X", task_changes=[], comments=[],
+        checklist_done=0, checklist_total=0,
+        files=[FileLink(name="f.pdf", url='https://p/1?a=1&b="x"')],
+        new_history_id=0, new_message_id=0,
+    )
+    msg = render.card_message(delta, "s", 'https://p/task?x=1&y="2"', LOCALES, "ru")
+    assert 'href="https://p/task?x=1&amp;y=&quot;2&quot;"' in msg
+    assert 'href="https://p/1?a=1&amp;b=&quot;x&quot;"' in msg
