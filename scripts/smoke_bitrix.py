@@ -12,10 +12,21 @@ from src.config import load_settings
 
 OUT = Path("tests/fixtures/live")
 
+_SECRET_KEYS = {"DOWNLOAD_URL", "urlDownload", "url_download", "downloadUrl"}
+
+
+def _redact(value):
+    """Recursively redact sensitive keys containing webhook tokens."""
+    if isinstance(value, dict):
+        return {k: ("[REDACTED]" if k in _SECRET_KEYS else _redact(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact(v) for v in value]
+    return value
+
 
 def dump(name: str, data) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / f"{name}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    (OUT / f"{name}.json").write_text(json.dumps(_redact(data), ensure_ascii=False, indent=2))
     print(f"  фикстура: {OUT / name}.json")
 
 
