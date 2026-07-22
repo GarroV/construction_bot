@@ -1,0 +1,11 @@
+{"list": [
+  {"id": "31", "createdDate": "2026-07-20T10:00:00+02:00",
+   "user": {"name": "Иван Петров"}, "field": "STATUS",
+   "value": {"from": "2", "to": "5"}},
+  {"id": "30", "createdDate": "2026-07-20T09:00:00+02:00",
+   "user": {"name": "Иван Петров"}, "field": "CHECKLIST_ITEM_CREATE",
+   "value": {"from": null, "to": "Заказать плитку"}},
+  {"id": "29", "createdDate": "2026-07-20T08:00:00+02:00",
+   "user": {"name": "Анна"}, "field": "COMMENT",
+   "value": {"from": null, "to": "12345"}}
+]}
