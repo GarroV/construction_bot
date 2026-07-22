@@ -101,3 +101,42 @@ async def test_membership_kicked_deactivates_chats(monkeypatch):
     deact.reset_mock()
     await commands.handle_membership(deps, -100, "member")
     deact.assert_not_awaited()
+
+
+def _member_msg(user_id):
+    return SimpleNamespace(
+        chat=SimpleNamespace(id=-100, title="Кыргызстан"),
+        from_user=SimpleNamespace(id=user_id),
+        is_topic_message=False,
+        message_thread_id=None,
+    )
+
+
+async def test_ensure_chat_restricted_denies_non_admin(monkeypatch):
+    pool = AsyncMock()
+    pool.fetch = AsyncMock(return_value=[{"telegram_user_id": 1}])
+    deps = make_deps(pool=pool)
+    restricted_chat = SimpleNamespace(id=7, restricted=True, digest_language="ru")
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=restricted_chat))
+
+    assert await commands.ensure_chat(deps, _member_msg(user_id=999)) is None
+
+
+async def test_ensure_chat_restricted_allows_admin(monkeypatch):
+    pool = AsyncMock()
+    pool.fetch = AsyncMock(return_value=[{"telegram_user_id": 1}])
+    deps = make_deps(pool=pool)
+    restricted_chat = SimpleNamespace(id=7, restricted=True, digest_language="ru")
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=restricted_chat))
+
+    assert await commands.ensure_chat(deps, _member_msg(user_id=1)) is restricted_chat
+
+
+async def test_ensure_chat_open_chat_skips_whitelist(monkeypatch):
+    pool = AsyncMock()
+    deps = make_deps(pool=pool)
+    open_chat = SimpleNamespace(id=7, restricted=False, digest_language="ru")
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=open_chat))
+
+    assert await commands.ensure_chat(deps, _member_msg(user_id=999)) is open_chat
+    pool.fetch.assert_not_awaited()
