@@ -61,6 +61,19 @@ async def handle_remove(deps, chat, args: str) -> str:
     return t(deps.locales, lang, key, task_id=task_id)
 
 
+def _addressed_to_me(message, bot_username: str) -> bool:
+    """Строгая адресация в группах: без @username команду игнорируем (в чате могут
+    жить другие боты со своей /add). В личке адресация не нужна. Если username
+    неизвестен (bot_username пуст) — ведём себя как раньше, не молчим."""
+    if not bot_username:
+        return True
+    chat_type = getattr(getattr(message, "chat", None), "type", "private")
+    if chat_type == "private":
+        return True
+    first_word = ((message.text or "").split() or [""])[0]
+    return first_word.lower().endswith(f"@{bot_username.lower()}")
+
+
 async def handle_start(deps, chat) -> str:
     """Приветствие/справка — партнёры жмут Start первым делом."""
     return t(deps.locales, chat.digest_language, "start_help")
@@ -149,6 +162,8 @@ def build_router(deps) -> Router:
     def register(cmd: str, core):
         @router.message(Command(cmd))
         async def _handler(message: Message, _core=core):
+            if not _addressed_to_me(message, getattr(deps, "bot_username", "")):
+                return  # голая команда в группе — молчим (адресность при нескольких ботах)
             chat = await ensure_chat(deps, message)
             if chat is None:
                 await message.reply(

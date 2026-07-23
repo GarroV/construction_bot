@@ -32,6 +32,7 @@ class Deps:
     settings: Any
     prompt_template: str
     send_fn: SendFn = field(default=send_html)
+    bot_username: str = ""  # для строгой адресации команд в группах
 
 
 def _chat_label(chat: ChatRow) -> str:

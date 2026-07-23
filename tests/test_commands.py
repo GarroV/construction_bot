@@ -185,3 +185,18 @@ async def test_start_returns_help(monkeypatch):
     deps = make_deps()
     reply = await commands.handle_start(deps, CHAT)
     assert "/add" in reply and "/time" in reply and "/list" in reply
+
+
+def test_addressed_to_me_rules():
+    group = SimpleNamespace(chat=SimpleNamespace(type="supergroup"), text="/add 42103")
+    group_addr = SimpleNamespace(chat=SimpleNamespace(type="supergroup"),
+                                 text="/add@Dodo_Construction_Bot 42103")
+    group_other = SimpleNamespace(chat=SimpleNamespace(type="supergroup"),
+                                  text="/add@other_bot 42103")
+    private = SimpleNamespace(chat=SimpleNamespace(type="private"), text="/add 42103")
+
+    assert commands._addressed_to_me(group, "dodo_construction_bot") is False
+    assert commands._addressed_to_me(group_addr, "dodo_construction_bot") is True
+    assert commands._addressed_to_me(group_other, "dodo_construction_bot") is False
+    assert commands._addressed_to_me(private, "dodo_construction_bot") is True
+    assert commands._addressed_to_me(group, "") is True  # username неизвестен -> не молчим

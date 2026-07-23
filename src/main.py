@@ -35,6 +35,7 @@ async def main() -> None:
         )
         if s.dry_run:
             deps.send_fn = dry_run_send
+        deps.bot_username = (await deps.bot.get_me()).username or ""
 
         scheduler = AsyncIOScheduler(timezone="UTC")
         scheduler.add_job(tick, "interval", minutes=s.scheduler_tick_minutes,
