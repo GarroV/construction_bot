@@ -179,3 +179,9 @@ async def test_ensure_chat_open_chat_skips_whitelist(monkeypatch):
 
     assert await commands.ensure_chat(deps, _member_msg(user_id=999)) is open_chat
     pool.fetch.assert_not_awaited()
+
+
+async def test_start_returns_help(monkeypatch):
+    deps = make_deps()
+    reply = await commands.handle_start(deps, CHAT)
+    assert "/add" in reply and "/time" in reply and "/list" in reply

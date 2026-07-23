@@ -61,6 +61,11 @@ async def handle_remove(deps, chat, args: str) -> str:
     return t(deps.locales, lang, key, task_id=task_id)
 
 
+async def handle_start(deps, chat) -> str:
+    """Приветствие/справка — партнёры жмут Start первым делом."""
+    return t(deps.locales, chat.digest_language, "start_help")
+
+
 async def handle_list(deps, chat) -> str:
     lang = chat.digest_language
     cards = await repo.list_active_cards(deps.pool, chat.id)
@@ -153,12 +158,14 @@ def build_router(deps) -> Router:
             if _core is handle_add:
                 text = await _core(deps, chat, _args_of(message),
                                    message.from_user.id if message.from_user else 0)
-            elif _core is handle_list:
+            elif _core in (handle_list, handle_start):
                 text = await _core(deps, chat)
             else:
                 text = await _core(deps, chat, _args_of(message))
             await message.reply(text)
 
+    register("start", handle_start)
+    register("help", handle_start)
     register("add", handle_add)
     register("remove", handle_remove)
     register("list", handle_list)
