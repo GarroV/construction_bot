@@ -50,6 +50,27 @@ async def fetch_new_chat_messages(
             return messages, users
 
 
+def _comment_records(res) -> list[dict]:
+    """task.commentitem.getlist на живом коробочном портале отдаёт голый список без
+    пагинации (проверено смоуком: 314 шт. на Belgrade-2); на всякий случай терпим и
+    обёртку {"list": [...]}, как у tasks.task.history.list."""
+    return res if isinstance(res, list) else (res.get("list", []) if isinstance(res, dict) else [])
+
+
+async def fetch_new_comments(bx: BitrixClient, task_id: int, last_comment_id: int) -> list[dict]:
+    """Fallback для старых карточек без chatId (§13): task.commentitem.getlist не
+    поддерживает срез по курсору — клиентская резка по int(ID) > last_comment_id,
+    сортировка по возрастанию id."""
+    res = await bx.call("task.commentitem.getlist", {"taskId": task_id})
+    fresh = [r for r in _comment_records(res) if int(r["ID"]) > last_comment_id]
+    return sorted(fresh, key=lambda r: int(r["ID"]))
+
+
+async def get_latest_comment_id(bx: BitrixClient, task_id: int) -> int:
+    res = await bx.call("task.commentitem.getlist", {"taskId": task_id})
+    return max((int(r["ID"]) for r in _comment_records(res)), default=0)
+
+
 async def get_checklist_counts(bx: BitrixClient, task_id: int) -> tuple[int, int]:
     items = await bx.call("task.checklistitem.getlist", {"taskId": task_id}) or []
     done = sum(1 for i in items if str(i.get("IS_COMPLETE")) == "Y")

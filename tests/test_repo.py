@@ -31,31 +31,51 @@ async def test_upsert_chat_is_idempotent(pool):
 async def test_add_card_lifecycle(pool):
     chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
 
-    r1 = await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 100, 200)
-    r2 = await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 100, 200)
+    r1 = await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 100, 200, 300)
+    r2 = await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 100, 200, 300)
     assert (r1, r2) == ("added", "exists")
 
     cur = await repo.get_cursor(pool, 8017, chat.id)
-    assert (cur.last_history_id, cur.last_message_id) == (100, 200)
+    assert (cur.last_history_id, cur.last_message_id, cur.last_comment_id) == (100, 200, 300)
 
     assert await repo.deactivate_card(pool, chat.id, 8017) is True
     assert await repo.deactivate_card(pool, chat.id, 999) is False
     assert await repo.list_active_cards(pool, chat.id) == []
 
     # повторный /add реактивирует и ПЕРЕинициализирует курсор (§5)
-    r3 = await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 150, 250)
+    r3 = await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 150, 250, 350)
     assert r3 == "reactivated"
     cur = await repo.get_cursor(pool, 8017, chat.id)
-    assert (cur.last_history_id, cur.last_message_id) == (150, 250)
+    assert (cur.last_history_id, cur.last_message_id, cur.last_comment_id) == (150, 250, 350)
+
+
+async def test_last_comment_id_column_defaults_to_zero(pool):
+    """Миграция 0002: ALTER TABLE ... ADD COLUMN last_comment_id BIGINT NOT NULL DEFAULT 0 —
+    прямая проверка через INSERT без указания last_comment_id (как были бы строки, заведённые
+    до миграции)."""
+    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    await pool.execute(
+        "INSERT INTO cards (bitrix_task_id, chat_id, alias, added_by) VALUES ($1,$2,$3,$4)",
+        9999, chat.id, "тест", 1,
+    )
+    await pool.execute(
+        "INSERT INTO cursors (bitrix_task_id, chat_id, last_history_id, last_message_id) "
+        "VALUES ($1,$2,$3,$4)",
+        9999, chat.id, 10, 20,
+    )
+
+    cur = await repo.get_cursor(pool, 9999, chat.id)
+
+    assert cur.last_comment_id == 0
 
 
 async def test_cursor_advance_and_marks(pool):
     chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
-    await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 0, 0)
+    await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 0, 0, 0)
 
-    await repo.advance_cursor(pool, 8017, chat.id, 111, 222)
+    await repo.advance_cursor(pool, 8017, chat.id, 111, 222, 333)
     cur = await repo.get_cursor(pool, 8017, chat.id)
-    assert (cur.last_history_id, cur.last_message_id) == (111, 222)
+    assert (cur.last_history_id, cur.last_message_id, cur.last_comment_id) == (111, 222, 333)
 
     await repo.mark_digest_run(pool, chat.id, dt.date(2026, 7, 21))
     await repo.mark_posted(pool, chat.id)
@@ -73,7 +93,7 @@ async def test_add_card_concurrent_race_condition(pool):
 
     # Simulate 10 concurrent calls
     tasks = [
-        repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 100, 200)
+        repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 100, 200, 300)
         for _ in range(10)
     ]
     results = await asyncio.gather(*tasks)

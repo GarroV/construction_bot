@@ -6,6 +6,7 @@ import respx
 import httpx
 from src.bitrix.client import BitrixClient
 from src.bitrix import methods, parse
+from src.bitrix.links import FileLink
 
 FIX = Path("tests/fixtures")
 BASE = "https://portal.bitrix24.ru/rest/123/abc/"
@@ -57,3 +58,84 @@ async def test_fetch_new_chat_messages_uses_first_id():
     assert [m["id"] for m in msgs] == [201]
     q = route.calls[0].request.url.params
     assert q["DIALOG_ID"] == "chat42" and q["FIRST_ID"] == "200"
+
+
+# --- Fallback старых карточек (§13): strip_bbcode / parse_comments / parse_comment_files ---
+
+
+def test_strip_bbcode_user_tag():
+    assert parse.strip_bbcode("[USER=935]Суботко Виталий[/USER], привет") == "Суботко Виталий, привет"
+
+
+def test_strip_bbcode_url_tag():
+    assert parse.strip_bbcode("смотри [URL=https://x]тут[/URL]") == "смотри тут"
+
+
+def test_strip_bbcode_nested_tags():
+    text = "[QUOTE]Пётр Петров написал:\n[B]нужно[/B] согласовать[/QUOTE]\nСогласовано."
+    assert parse.strip_bbcode(text) == "Пётр Петров написал:\nнужно согласовать\nСогласовано."
+
+
+def test_strip_bbcode_singleton_tag_without_pair_is_removed():
+    assert parse.strip_bbcode("до [ANCHOR=123] после") == "до  после"
+
+
+def test_strip_bbcode_empty_text_returns_empty():
+    assert parse.strip_bbcode("") == ""
+
+
+def test_parse_comments_sorts_and_cleans_bbcode():
+    records = json.loads((FIX / "comments_page.json").read_text())
+
+    msgs = parse.parse_comments(records)
+
+    assert [m.id for m in msgs] == [100, 101, 103]  # сортировка по int(ID) asc, не по порядку в списке
+    assert msgs[1].text == "Пётр Петров написал:\nнужно согласовать\nСогласовано."
+    assert msgs[2].text == "Иван Иванов, согласен, сделаем к пятнице. Смотри план."
+    assert all(m.file_ids == [] for m in msgs)  # файлы отдельно — parse_comment_files
+
+
+def test_parse_comment_files_names_only_no_secret_leak():
+    records = json.loads((FIX / "comments_page.json").read_text())
+
+    files = parse.parse_comment_files(records)
+
+    assert files == [FileLink(name="план.pdf", url=None)]
+    # инвариант §8: DOWNLOAD_URL/VIEW_URL (токен вебхука) не просачиваются наружу ни в имя, ни в url
+    dump = "".join(f"{f.name}{f.url}" for f in files)
+    assert "SUPER_SECRET_TOKEN" not in dump
+
+
+@respx.mock
+async def test_fetch_new_comments_cuts_by_cursor_and_sorts():
+    records = json.loads((FIX / "comments_page.json").read_text())
+    respx.get(BASE + "task.commentitem.getlist.json").respond(json={"result": records})
+    async with httpx.AsyncClient() as http:
+        bx = BitrixClient(BASE, http, min_interval=0)
+
+        fresh = await methods.fetch_new_comments(bx, 8017, last_comment_id=100)
+
+    assert [int(r["ID"]) for r in fresh] == [101, 103]  # id=100 отрезан курсором, сортировка asc
+
+
+@respx.mock
+async def test_get_latest_comment_id_returns_max():
+    records = json.loads((FIX / "comments_page.json").read_text())
+    respx.get(BASE + "task.commentitem.getlist.json").respond(json={"result": records})
+    async with httpx.AsyncClient() as http:
+        bx = BitrixClient(BASE, http, min_interval=0)
+
+        latest = await methods.get_latest_comment_id(bx, 8017)
+
+    assert latest == 103
+
+
+@respx.mock
+async def test_get_latest_comment_id_empty_list_returns_zero():
+    respx.get(BASE + "task.commentitem.getlist.json").respond(json={"result": []})
+    async with httpx.AsyncClient() as http:
+        bx = BitrixClient(BASE, http, min_interval=0)
+
+        latest = await methods.get_latest_comment_id(bx, 8017)
+
+    assert latest == 0

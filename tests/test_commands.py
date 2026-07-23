@@ -32,13 +32,32 @@ async def test_add_happy_path(monkeypatch):
                         AsyncMock(return_value={"title": "Бишкек 8", "chatId": 42}))
     monkeypatch.setattr(commands.methods, "get_latest_history_id", AsyncMock(return_value=100))
     monkeypatch.setattr(commands.methods, "get_latest_chat_message_id", AsyncMock(return_value=200))
+    monkeypatch.setattr(commands.methods, "get_latest_comment_id", AsyncMock(return_value=0))
     add_card = AsyncMock(return_value="added")
     monkeypatch.setattr(commands.repo, "add_card", add_card)
 
     reply = await commands.handle_add(deps, CHAT, "8017", user_id=555)
 
     assert "Бишкек 8" in reply and "8017" in reply
-    add_card.assert_awaited_once_with(deps.pool, 1, 8017, "Бишкек 8", 555, 100, 200)
+    add_card.assert_awaited_once_with(deps.pool, 1, 8017, "Бишкек 8", 555, 100, 200, 0)
+
+
+async def test_add_old_card_initializes_comment_cursor(monkeypatch):
+    """§5: курсор комментариев старой карточки инициализируется «с этого момента» —
+    первый дайджест не должен вываливать всю историю task.commentitem.getlist
+    (314 шт. на живом смоуке, §13 fallback)."""
+    deps = make_deps()
+    monkeypatch.setattr(commands.methods, "get_task",
+                        AsyncMock(return_value={"title": "Старая стройка"}))  # нет chatId
+    monkeypatch.setattr(commands.methods, "get_latest_history_id", AsyncMock(return_value=50))
+    monkeypatch.setattr(commands.methods, "get_latest_chat_message_id", AsyncMock(return_value=0))
+    monkeypatch.setattr(commands.methods, "get_latest_comment_id", AsyncMock(return_value=314))
+    add_card = AsyncMock(return_value="added")
+    monkeypatch.setattr(commands.repo, "add_card", add_card)
+
+    await commands.handle_add(deps, CHAT, "9001", user_id=1)
+
+    add_card.assert_awaited_once_with(deps.pool, 1, 9001, "Старая стройка", 1, 50, 0, 314)
 
 
 async def test_add_rejects_bad_args_and_missing_task(monkeypatch):

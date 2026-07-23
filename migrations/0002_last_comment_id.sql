@@ -1,0 +1,1 @@
+ALTER TABLE cursors ADD COLUMN last_comment_id BIGINT NOT NULL DEFAULT 0;

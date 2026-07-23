@@ -28,6 +28,7 @@ class CardDelta:
     files: list[FileLink]
     new_history_id: int
     new_message_id: int
+    new_comment_id: int = 0  # курсор комментариев старой карточки без chatId (§13)
 
     @property
     def has_changes(self) -> bool:

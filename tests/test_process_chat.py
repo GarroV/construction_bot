@@ -16,7 +16,7 @@ PROMPT = llm.load_prompt()
 
 CARD = CardRow(id=1, bitrix_task_id=8017, chat_id=1, alias="Бишкек 8", active=True)
 CARD2 = CardRow(id=2, bitrix_task_id=8018, chat_id=1, alias="Бишкек 9", active=True)
-CUR = CursorRow(bitrix_task_id=8017, chat_id=1, last_history_id=20, last_message_id=200)
+CUR = CursorRow(bitrix_task_id=8017, chat_id=1, last_history_id=20, last_message_id=200, last_comment_id=0)
 DELTA_WITH_CHANGES = CardDelta(
     task_id=8017, alias="Бишкек 8", task_changes=["статус: 2 → 5"], comments=[],
     checklist_done=3, checklist_total=10, files=[], new_history_id=31, new_message_id=202,
@@ -119,7 +119,7 @@ async def test_cursor_advances_only_on_ok(monkeypatch):
     send_fn.return_value = SendResult(ok=True)
 
     await scheduler.process_chat(deps, chat, now)
-    repo_mocks.advance_cursor.assert_awaited_once_with(deps.pool, 8017, chat.id, 31, 202)
+    repo_mocks.advance_cursor.assert_awaited_once_with(deps.pool, 8017, chat.id, 31, 202, 0)
     repo_mocks.mark_posted.assert_awaited_once_with(deps.pool, chat.id)
 
 

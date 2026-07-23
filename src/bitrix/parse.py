@@ -1,4 +1,14 @@
+import re
 from dataclasses import dataclass
+
+from .links import FileLink
+
+# Парная BB-тег-пара: [TAG] или [TAG=атрибут] ... [/TAG] (то же имя в закрывающем, регистр
+# не важен — задаёт и re.IGNORECASE, и обратные ссылки \1 под тем же флагом). Покрывает
+# [USER=id]Имя[/USER], [URL=x]текст[/URL], [B]...[/B], [QUOTE]...[/QUOTE] и т.п. одним правилом.
+_BB_PAIR_RE = re.compile(r"\[(\w+)(?:=[^\]]*)?\](.*?)\[/\1\]", re.IGNORECASE | re.DOTALL)
+# Одиночные теги без пары (открывающие или осиротевшие закрывающие) — вырезаются целиком.
+_BB_SINGLE_RE = re.compile(r"\[/?\w+(?:=[^\]]*)?\]")
 
 _FIELD_LABELS = {
     "STATUS": "статус",
@@ -59,3 +69,48 @@ def parse_chat_messages(messages: list[dict], users: dict) -> list[ChatMessage]:
 def _users_by_id(users) -> dict[int, str]:
     items = users.values() if isinstance(users, dict) else (users or [])
     return {int(u["id"]): str(u.get("name") or "") for u in items}
+
+
+def strip_bbcode(text: str) -> str:
+    """Fallback старых карточек (§13): task.commentitem.getlist отдаёт POST_MESSAGE с
+    BB-кодами ([USER=id]Имя[/USER], [URL=x]текст[/URL], [B]...[/B], [QUOTE]...[/QUOTE]),
+    в LLM должен идти чистый текст. Парные теги снимаются, содержимое остаётся (в т.ч.
+    вложенные — цикл до неподвижной точки), одиночные без пары вырезаются целиком."""
+    if not text:
+        return ""
+    result = text
+    while True:
+        stripped = _BB_PAIR_RE.sub(lambda m: m.group(2), result)
+        if stripped == result:
+            break
+        result = stripped
+    return _BB_SINGLE_RE.sub("", result)
+
+
+def parse_comments(records: list[dict]) -> list[ChatMessage]:
+    """task.commentitem.getlist -> ChatMessage (§13 fallback). Файлы сюда не попадают —
+    их даёт parse_comment_files (id вложений комментариев — не то же пространство id,
+    что file_ids чата задачи)."""
+    out = [
+        ChatMessage(
+            id=int(r["ID"]),
+            author=str(r.get("AUTHOR_NAME") or ""),
+            text=strip_bbcode(str(r.get("POST_MESSAGE") or "")),
+            file_ids=[],
+        )
+        for r in records
+    ]
+    return sorted(out, key=lambda m: m.id)
+
+
+def parse_comment_files(records: list[dict]) -> list[FileLink]:
+    """ATTACHED_OBJECTS старых комментариев -> FileLink без ссылки (§8, §13): disk.file.get
+    на файлы старых карточек отдаёт ACCESS_DENIED, постоянные ссылки не строим. Инвариант:
+    DOWNLOAD_URL/VIEW_URL (несут токен вебхука) сюда не читаются и никогда не попадают наружу."""
+    out: list[FileLink] = []
+    for r in records:
+        attached = r.get("ATTACHED_OBJECTS") or {}
+        items = attached.values() if isinstance(attached, dict) else attached
+        for obj in items:
+            out.append(FileLink(name=str(obj.get("NAME") or ""), url=None))
+    return out

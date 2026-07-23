@@ -41,6 +41,7 @@ class CursorRow:
     chat_id: int
     last_history_id: int
     last_message_id: int
+    last_comment_id: int
 
 
 def _chat(r: asyncpg.Record) -> ChatRow:
@@ -91,7 +92,8 @@ async def deactivate_chat(pool, chat_id: int) -> None:
 
 
 async def add_card(
-    pool, chat_id, bitrix_task_id, alias, added_by, last_history_id, last_message_id
+    pool, chat_id, bitrix_task_id, alias, added_by,
+    last_history_id, last_message_id, last_comment_id,
 ) -> str:
     async with pool.acquire() as conn, conn.transaction():
         # Try to insert; if conflict, DO NOTHING returns None
@@ -103,9 +105,9 @@ async def add_card(
         if inserted:
             # New card was inserted
             await conn.execute(
-                "INSERT INTO cursors (bitrix_task_id, chat_id, last_history_id, last_message_id) "
-                "VALUES ($1,$2,$3,$4)",
-                bitrix_task_id, chat_id, last_history_id, last_message_id,
+                "INSERT INTO cursors (bitrix_task_id, chat_id, last_history_id, "
+                "last_message_id, last_comment_id) VALUES ($1,$2,$3,$4,$5)",
+                bitrix_task_id, chat_id, last_history_id, last_message_id, last_comment_id,
             )
             return "added"
 
@@ -120,9 +122,9 @@ async def add_card(
         # Reactivate and reinitialize cursor
         await conn.execute("UPDATE cards SET active = TRUE WHERE id = $1", existing["id"])
         await conn.execute(
-            "UPDATE cursors SET last_history_id=$3, last_message_id=$4, updated_at=now() "
-            "WHERE bitrix_task_id=$1 AND chat_id=$2",
-            bitrix_task_id, chat_id, last_history_id, last_message_id,
+            "UPDATE cursors SET last_history_id=$3, last_message_id=$4, last_comment_id=$5, "
+            "updated_at=now() WHERE bitrix_task_id=$1 AND chat_id=$2",
+            bitrix_task_id, chat_id, last_history_id, last_message_id, last_comment_id,
         )
         return "reactivated"
 
@@ -146,18 +148,20 @@ async def list_active_cards(pool, chat_id: int) -> list[CardRow]:
 
 async def get_cursor(pool, bitrix_task_id: int, chat_id: int) -> CursorRow:
     r = await pool.fetchrow(
-        "SELECT bitrix_task_id, chat_id, last_history_id, last_message_id FROM cursors "
-        "WHERE bitrix_task_id = $1 AND chat_id = $2",
+        "SELECT bitrix_task_id, chat_id, last_history_id, last_message_id, last_comment_id "
+        "FROM cursors WHERE bitrix_task_id = $1 AND chat_id = $2",
         bitrix_task_id, chat_id,
     )
     return CursorRow(**dict(r))
 
 
-async def advance_cursor(pool, bitrix_task_id, chat_id, last_history_id, last_message_id) -> None:
+async def advance_cursor(
+    pool, bitrix_task_id, chat_id, last_history_id, last_message_id, last_comment_id
+) -> None:
     await pool.execute(
-        "UPDATE cursors SET last_history_id=$3, last_message_id=$4, updated_at=now() "
-        "WHERE bitrix_task_id=$1 AND chat_id=$2",
-        bitrix_task_id, chat_id, last_history_id, last_message_id,
+        "UPDATE cursors SET last_history_id=$3, last_message_id=$4, last_comment_id=$5, "
+        "updated_at=now() WHERE bitrix_task_id=$1 AND chat_id=$2",
+        bitrix_task_id, chat_id, last_history_id, last_message_id, last_comment_id,
     )
 
 

@@ -32,8 +32,12 @@ async def handle_add(deps, chat, args: str, user_id: int) -> str:
     last_message_id = await methods.get_latest_chat_message_id(
         deps.bx, int(bitrix_chat_id) if bitrix_chat_id else None
     )
+    # курсор комментариев «с этого момента» (§5): иначе первый дайджест старой карточки
+    # вываливает всю историю task.commentitem.getlist (сотни шт., см. §13 fallback)
+    last_comment_id = await methods.get_latest_comment_id(deps.bx, task_id)
     outcome = await repo.add_card(
-        deps.pool, chat.id, task_id, alias, user_id, last_history_id, last_message_id
+        deps.pool, chat.id, task_id, alias, user_id,
+        last_history_id, last_message_id, last_comment_id,
     )
     key = {"added": "add_ok", "exists": "add_exists", "reactivated": "add_reactivated"}[outcome]
     return t(deps.locales, lang, key, alias=alias, task_id=task_id)

@@ -1,0 +1,36 @@
+[
+  {
+    "ID": "100",
+    "AUTHOR_ID": "10",
+    "AUTHOR_NAME": "Иван Иванов",
+    "AUTHOR_EMAIL": "",
+    "POST_DATE": "2026-07-01T10:00:00+03:00",
+    "POST_MESSAGE": "Старый комментарий до курсора"
+  },
+  {
+    "ID": "103",
+    "AUTHOR_ID": "20",
+    "AUTHOR_NAME": "Пётр Петров",
+    "AUTHOR_EMAIL": "",
+    "POST_DATE": "2026-07-02T11:00:00+03:00",
+    "POST_MESSAGE": "[USER=10]Иван Иванов[/USER], согласен, сделаем к пятнице. Смотри [URL=https://example.com/plan]план[/URL]."
+  },
+  {
+    "ID": "101",
+    "AUTHOR_ID": "10",
+    "AUTHOR_NAME": "Иван Иванов",
+    "AUTHOR_EMAIL": "",
+    "POST_DATE": "2026-07-02T09:00:00+03:00",
+    "POST_MESSAGE": "[QUOTE]Пётр Петров написал:\n[B]нужно[/B] согласовать[/QUOTE]\nСогласовано.",
+    "ATTACHED_OBJECTS": {
+      "500": {
+        "ATTACHMENT_ID": "500",
+        "NAME": "план.pdf",
+        "SIZE": "12345",
+        "FILE_ID": "999",
+        "DOWNLOAD_URL": "https://portal.example/bitrix/tools/disk/uf.php?action=download&webhook_token=SUPER_SECRET_TOKEN",
+        "VIEW_URL": "https://portal.example/bitrix/tools/disk/uf.php?action=view&webhook_token=SUPER_SECRET_TOKEN"
+      }
+    }
+  }
+]

@@ -12,7 +12,7 @@ from src.config import load_settings
 
 OUT = Path("tests/fixtures/live")
 
-_SECRET_KEYS = {"DOWNLOAD_URL", "urlDownload", "url_download", "downloadUrl"}
+_SECRET_KEYS = {"DOWNLOAD_URL", "urlDownload", "url_download", "downloadUrl", "VIEW_URL", "urlShow"}
 
 
 def _redact(value):

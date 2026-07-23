@@ -93,7 +93,8 @@ async def process_chat(deps: Deps, chat: ChatRow, now_utc: dt.datetime) -> list[
                 posted = True
                 if delta.has_changes:
                     await repo.advance_cursor(deps.pool, delta.task_id, chat.id,
-                                              delta.new_history_id, delta.new_message_id)
+                                              delta.new_history_id, delta.new_message_id,
+                                              delta.new_comment_id)
             except Exception as e:  # изоляция цикла отправки (§7 п.9): чат не должен ретраиться каждые 5 мин
                 log.exception("отправка карточки %s/%s", chat.id, delta.task_id)
                 errors.append(f"{_chat_label(chat)}: карточка #{delta.task_id}: {e}")
