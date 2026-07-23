@@ -35,7 +35,7 @@ def test_parse_chat_messages_filters_system_and_sorts():
 @respx.mock
 async def test_fetch_new_history_stops_at_cursor():
     page = {"result": {"list": [{"id": "30"}, {"id": "20"}, {"id": "10"}]}}  # desc
-    respx.post(BASE + "tasks.task.history.list").respond(json=page)
+    respx.get(BASE + "tasks.task.history.list.json").respond(json=page)
     async with httpx.AsyncClient() as http:
         bx = BitrixClient(BASE, http, min_interval=0)
 
@@ -46,7 +46,7 @@ async def test_fetch_new_history_stops_at_cursor():
 
 @respx.mock
 async def test_fetch_new_chat_messages_uses_first_id():
-    route = respx.post(BASE + "im.dialog.messages.get")
+    route = respx.get(BASE + "im.dialog.messages.get.json")
     route.respond(json={"result": {"messages": [{"id": 201, "author_id": 5, "text": "ok"}],
                                    "users": [{"id": 5, "name": "Иван"}]}})
     async with httpx.AsyncClient() as http:
@@ -55,5 +55,5 @@ async def test_fetch_new_chat_messages_uses_first_id():
         msgs, users = await methods.fetch_new_chat_messages(bx, chat_id=42, last_message_id=200)
 
     assert [m["id"] for m in msgs] == [201]
-    sent = json.loads(route.calls[0].request.content)
-    assert sent["DIALOG_ID"] == "chat42" and sent["FIRST_ID"] == 200
+    q = route.calls[0].request.url.params
+    assert q["DIALOG_ID"] == "chat42" and q["FIRST_ID"] == "200"

@@ -21,8 +21,31 @@ class BitrixError(Exception):
         self.description = description
 
 
+def _encode_params(params: dict | None) -> list[tuple[str, str]]:
+    """Bitrix-стиль query-параметров: списки -> key[], словари -> key[sub]."""
+    out: list[tuple[str, str]] = []
+
+    def walk(key: str, val) -> None:
+        if isinstance(val, dict):
+            for k, v in val.items():
+                walk(f"{key}[{k}]", v)
+        elif isinstance(val, (list, tuple)):
+            for v in val:
+                walk(f"{key}[]", v)
+        elif val is not None:
+            out.append((key, str(val)))
+
+    for k, v in (params or {}).items():
+        walk(k, v)
+    return out
+
+
 class BitrixClient:
-    """Вебхук-клиент: троттлинг ≤2 rps (leaky bucket облака), retry на 503 (§13)."""
+    """Вебхук-клиент: троттлинг ≤2 rps (leaky bucket облака), retry на 503 (§13).
+
+    Вызовы идут GET-ом с параметрами в query: антибот Servicepipe перед коробочным
+    порталом отдаёт JS-challenge на POST, но пропускает GET (проверено 2026-07-23).
+    """
 
     def __init__(self, webhook_url: str, http: httpx.AsyncClient, min_interval: float = 0.5):
         self._base = webhook_url.rstrip("/") + "/"
@@ -40,9 +63,9 @@ class BitrixClient:
         for attempt in range(_MAX_ATTEMPTS):
             await self._wait_slot()
             try:
-                resp = await self._http.post(
-                    self._base + method,
-                    json=params or {},
+                resp = await self._http.get(
+                    self._base + method + ".json",
+                    params=_encode_params(params),
                     headers={"User-Agent": _USER_AGENT},
                 )
             except httpx.HTTPError as e:  # сеть/таймаут — честный контракт (§ фикс №4):

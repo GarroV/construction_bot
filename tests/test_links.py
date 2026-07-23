@@ -14,7 +14,7 @@ def test_task_url_built_from_webhook_host():
 
 @respx.mock
 async def test_resolve_files_returns_detail_url_and_survives_errors():
-    route = respx.post(BASE + "disk.file.get")
+    route = respx.get(BASE + "disk.file.get.json")
     route.side_effect = [
         httpx.Response(200, json={"result": {
             "NAME": "план.pdf",
