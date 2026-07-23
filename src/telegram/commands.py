@@ -1,4 +1,5 @@
 import datetime as dt
+import logging
 import re
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,7 @@ from src.bitrix.client import BitrixError
 from src.i18n import t
 from src.telegram.capture import chat_title_of, thread_id_of
 
+log = logging.getLogger(__name__)
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _LANG_RE = re.compile(r"^[a-z]{2}(-[a-z]{2})?$", re.IGNORECASE)
 
@@ -33,8 +35,14 @@ async def handle_add(deps, chat, args: str, user_id: int) -> str:
         deps.bx, int(bitrix_chat_id) if bitrix_chat_id else None
     )
     # курсор комментариев «с этого момента» (§5): иначе первый дайджест старой карточки
-    # вываливает всю историю task.commentitem.getlist (сотни шт., см. §13 fallback)
-    last_comment_id = await methods.get_latest_comment_id(deps.bx, task_id)
+    # вываливает всю историю task.commentitem.getlist (сотни шт., см. §13 fallback).
+    # task.commentitem.getlist — deprecated: на карточке нового типа может ответить ошибкой;
+    # /add не должен из-за этого падать целиком (паттерн как в links.resolve_files).
+    try:
+        last_comment_id = await methods.get_latest_comment_id(deps.bx, task_id)
+    except BitrixError as e:
+        log.warning("get_latest_comment_id(%s) не удался: %s", task_id, e)
+        last_comment_id = 0
     outcome = await repo.add_card(
         deps.pool, chat.id, task_id, alias, user_id,
         last_history_id, last_message_id, last_comment_id,

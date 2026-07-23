@@ -76,12 +76,34 @@ def test_strip_bbcode_nested_tags():
     assert parse.strip_bbcode(text) == "Пётр Петров написал:\nнужно согласовать\nСогласовано."
 
 
-def test_strip_bbcode_singleton_tag_without_pair_is_removed():
-    assert parse.strip_bbcode("до [ANCHOR=123] после") == "до  после"
+def test_strip_bbcode_known_singleton_tag_is_removed():
+    """BR — известный самозакрывающийся BB-тег из вайтлиста, без пары."""
+    assert parse.strip_bbcode("текст [BR] дальше") == "текст  дальше"
 
 
 def test_strip_bbcode_empty_text_returns_empty():
     assert parse.strip_bbcode("") == ""
+
+
+# --- Регрессия ревью (Critical): вайтлист, а не любое [слово] — иначе съедает легитимный текст ---
+
+
+def test_strip_bbcode_preserves_bracketed_word_not_a_known_tag():
+    assert parse.strip_bbcode("[важно] встретиться") == "[важно] встретиться"
+
+
+def test_strip_bbcode_preserves_footnote_markers():
+    assert parse.strip_bbcode("см. [1] и [2]") == "см. [1] и [2]"
+
+
+def test_strip_bbcode_preserves_todo_marker():
+    assert parse.strip_bbcode("[TODO] доделать") == "[TODO] доделать"
+
+
+def test_strip_bbcode_removes_disk_file_tag_with_space_attribute():
+    """[DISK FILE ID=n123] — реальная форма Bitrix для встроенных файлов, атрибут через
+    пробел, а не «=» сразу после имени тега."""
+    assert parse.strip_bbcode("смотри [DISK FILE ID=n123] тут") == "смотри  тут"
 
 
 def test_parse_comments_sorts_and_cleans_bbcode():

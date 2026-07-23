@@ -60,6 +60,26 @@ async def test_add_old_card_initializes_comment_cursor(monkeypatch):
     add_card.assert_awaited_once_with(deps.pool, 1, 9001, "Старая стройка", 1, 50, 0, 314)
 
 
+async def test_add_degrades_to_zero_comment_cursor_when_comment_api_errors(monkeypatch):
+    """Important-фикс ревью: task.commentitem.getlist — deprecated метод; на карточке нового
+    типа он может ответить ошибкой. /add не должен падать целиком (паттерн как в
+    links.resolve_files) — деградация last_comment_id=0, а не пробрасывание BitrixError."""
+    deps = make_deps()
+    monkeypatch.setattr(commands.methods, "get_task",
+                        AsyncMock(return_value={"title": "Бишкек 8", "chatId": 42}))
+    monkeypatch.setattr(commands.methods, "get_latest_history_id", AsyncMock(return_value=100))
+    monkeypatch.setattr(commands.methods, "get_latest_chat_message_id", AsyncMock(return_value=200))
+    monkeypatch.setattr(commands.methods, "get_latest_comment_id",
+                        AsyncMock(side_effect=BitrixError("NOT_FOUND", "deprecated method")))
+    add_card = AsyncMock(return_value="added")
+    monkeypatch.setattr(commands.repo, "add_card", add_card)
+
+    reply = await commands.handle_add(deps, CHAT, "8017", user_id=555)
+
+    assert "Бишкек 8" in reply and "8017" in reply  # add_ok, а не падение
+    add_card.assert_awaited_once_with(deps.pool, 1, 8017, "Бишкек 8", 555, 100, 200, 0)
+
+
 async def test_add_rejects_bad_args_and_missing_task(monkeypatch):
     deps = make_deps()
     assert "Использование" in await commands.handle_add(deps, CHAT, "", user_id=1)
