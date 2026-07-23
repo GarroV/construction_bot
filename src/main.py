@@ -3,6 +3,7 @@ import logging
 
 import httpx
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from openai import AsyncOpenAI
 
@@ -39,6 +40,17 @@ async def main() -> None:
         scheduler.add_job(tick, "interval", minutes=s.scheduler_tick_minutes,
                           args=[deps], max_instances=1, coalesce=True)
         scheduler.start()
+
+        # Меню команд: дискаверабилити + при нескольких ботах в чате клиент
+        # подставляет @username из меню автоматически (адресация без коллизий)
+        await deps.bot.set_my_commands([
+            BotCommand(command="add", description="Подключить карточку: /add 42103"),
+            BotCommand(command="list", description="Что отслеживается в этом топике"),
+            BotCommand(command="remove", description="Снять карточку: /remove 42103"),
+            BotCommand(command="time", description="Время дайджеста: /time 09:00 Europe/Belgrade"),
+            BotCommand(command="lang", description="Язык дайджеста: /lang ru"),
+            BotCommand(command="help", description="Как пользоваться ботом"),
+        ])
 
         dp = Dispatcher()
         dp.include_router(build_router(deps))
