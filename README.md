@@ -141,10 +141,19 @@ TEST_POSTGRES_DSN=postgresql://bot:bot@<host>:5544/botdb .venv/bin/pytest -v
 
 ### Результаты смоук-теста
 
-Ожидает живого прогона — вебхук Битрикс24 ещё не выдан. Здесь появятся результаты
-`scripts/smoke_bitrix.py` (наличие `COMMENT` в `tasks.task.history.list`, состав `author_id` в
-`im.dialog.messages.get`, кликабельность ссылок `disk.file.get` под партнёрским аккаунтом) после
-первого прогона по реальной карточке.
+Прогнан 2026-07-23 (`scripts/smoke_bitrix.py 42103`, портал `b24.dodoteam.ru` — коробочный):
+
+- Карточки **старого типа**: у задач нет чата → комментарии читаются через `task.commentitem.getlist`
+  (курсор `cursors.last_comment_id`, миграция 0002); BB-коды снимаются перед LLM.
+- `COMMENT` в `tasks.task.history.list` есть; чек-лист и история читаются штатно.
+- `disk.file.get` на файлы из комментариев — ACCESS_DENIED → файлы в дайджесте идут именем
+  без ссылки (ссылка ведёт на карточку, файлы там).
+- Портал за антиботом Servicepipe: клиент Битрикса ходит **GET-ом с браузерным User-Agent**
+  (POST режется JS-challenge'ем). Запрошено WAF-исключение по маркеру `construction-bot` в UA.
+- Права вебхука: **«Задачи (task)»** — не путать с соседним «Задачи (tasks)», тот даёт
+  `insufficient_scope`. Плюс Диск (disk) и Чат и уведомления (im).
+- Живые фикстуры — `tests/fixtures/live/` (только локально, в git не идут — ПДн; редакция
+  вычищает URL с токеном вебхука: `DOWNLOAD_URL`/`VIEW_URL`).
 
 ## 6. Канон требований
 
