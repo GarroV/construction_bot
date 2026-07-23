@@ -52,7 +52,11 @@ def build_prompt(template: str, delta: CardDelta, language: str, date_str: str) 
 
 
 def _is_client_error(e: Exception) -> bool:
-    """4xx от OpenAI — ошибка запроса (промпт/параметры), ретраить бессмысленно."""
+    """4xx от OpenAI — ошибка запроса (промпт/параметры), ретраить бессмысленно.
+    Исключение — 429 (RateLimitError): это транзиентный лимит, а не ошибка запроса,
+    его штатно ретраим с backoff (§7 п.6, §11)."""
+    if isinstance(e, openai.RateLimitError):
+        return False
     if isinstance(e, openai.BadRequestError):
         return True
     return isinstance(e, openai.APIStatusError) and 400 <= e.status_code < 500

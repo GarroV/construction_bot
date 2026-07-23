@@ -73,6 +73,25 @@ async def test_summarize_bad_request_fails_fast_without_retry(monkeypatch):
     assert client.chat.completions.create.await_count == 1
 
 
+async def test_summarize_retries_rate_limit_then_succeeds(monkeypatch):
+    """429 (RateLimitError) — транзиентный лимит, а не ошибка запроса: ретраим с backoff
+    (§7 п.6, §11), не fail-fast как прочие 4xx."""
+    monkeypatch.setattr(llm.asyncio, "sleep", AsyncMock())
+    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    resp = httpx.Response(429, request=req, json={"error": {"message": "rate limited"}})
+    error = openai.RateLimitError("rate limited", response=resp, body=None)
+
+    ok_resp = AsyncMock()
+    ok_resp.choices = [AsyncMock(message=AsyncMock(content="Сводка дня."))]
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(side_effect=[error, error, ok_resp])
+
+    result = await llm.summarize(client, "gpt-5-mini", "prompt")
+
+    assert result == "Сводка дня."
+    assert client.chat.completions.create.await_count == 3
+
+
 async def test_summarize_uses_max_completion_tokens():
     """gpt-5 отвергает max_tokens с 400 — контракт требует max_completion_tokens."""
     client = _client_returning("Сводка дня.")
