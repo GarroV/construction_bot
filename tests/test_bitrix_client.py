@@ -76,3 +76,15 @@ async def test_transport_error_wrapped_in_bitrix_error(http):
     with pytest.raises(BitrixError) as e:
         await bx.call("tasks.task.get", {"taskId": 1})
     assert e.value.code == "TRANSPORT_ERROR"
+
+
+@respx.mock
+async def test_sends_browser_like_user_agent(http):
+    """WAF коробочного портала режет python-httpx UA — клиент обязан слать браузерный."""
+    route = respx.post(BASE + "tasks.task.get").respond(json={"result": {"ok": True}})
+    bx = BitrixClient(BASE, http, min_interval=0)
+
+    await bx.call("tasks.task.get")
+
+    ua = route.calls[0].request.headers["User-Agent"]
+    assert ua.startswith("Mozilla/5.0") and "construction-bot" in ua

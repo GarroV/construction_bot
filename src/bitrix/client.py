@@ -6,6 +6,13 @@ import httpx
 
 _MAX_ATTEMPTS = 4  # 503-ретраи: паузы 1s, 2s, 4s
 
+# WAF коробочного портала (b24.dodoteam.ru) отдаёт HTML "Forbidden" на не-браузерные
+# User-Agent (python-httpx/*, пустой) — проверено вживую 2026-07-23. Шлём браузерный.
+_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36 construction-bot/0.1"
+)
+
 
 class BitrixError(Exception):
     def __init__(self, code: str, description: str = ""):
@@ -33,7 +40,11 @@ class BitrixClient:
         for attempt in range(_MAX_ATTEMPTS):
             await self._wait_slot()
             try:
-                resp = await self._http.post(self._base + method, json=params or {})
+                resp = await self._http.post(
+                    self._base + method,
+                    json=params or {},
+                    headers={"User-Agent": _USER_AGENT},
+                )
             except httpx.HTTPError as e:  # сеть/таймаут — честный контракт (§ фикс №4):
                 raise BitrixError("TRANSPORT_ERROR", str(e)) from e  # вызывающие ловят только BitrixError
             if resp.status_code == 503:  # QUERY_LIMIT_EXCEEDED
