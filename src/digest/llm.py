@@ -3,12 +3,14 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+import openai
+
 from src.bitrix.links import FileLink
 from src.bitrix.parse import ChatMessage
 
 log = logging.getLogger(__name__)
 _ATTEMPTS = 3
-_MAX_TOKENS = 500  # ~150 слов + запас (§9)
+_MAX_TOKENS = 1500  # reasoning-модели (gpt-5) тратят часть бюджета на рассуждения
 
 
 class LlmUnavailable(Exception):
@@ -49,17 +51,32 @@ def build_prompt(template: str, delta: CardDelta, language: str, date_str: str) 
     )
 
 
+def _is_client_error(e: Exception) -> bool:
+    """4xx от OpenAI — ошибка запроса (промпт/параметры), ретраить бессмысленно."""
+    if isinstance(e, openai.BadRequestError):
+        return True
+    return isinstance(e, openai.APIStatusError) and 400 <= e.status_code < 500
+
+
 async def summarize(client, model: str, prompt: str) -> str:
     for attempt in range(_ATTEMPTS):
+        warning = None
         try:
             resp = await client.chat.completions.create(
                 model=model,
-                max_tokens=_MAX_TOKENS,
+                max_completion_tokens=_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return resp.choices[0].message.content or ""
-        except Exception as e:  # сеть/5xx/лимиты — ретраим всё (§7 п.6)
-            log.warning("OpenAI попытка %d/%d: %s", attempt + 1, _ATTEMPTS, e)
-            if attempt < _ATTEMPTS - 1:
-                await asyncio.sleep(2**attempt)
+            content = resp.choices[0].message.content
+            if content is not None and content.strip():
+                return content
+            warning = "OpenAI вернул пустой ответ"  # пустой ответ — отказ, не результат (не ретраить как успех)
+        except Exception as e:
+            if _is_client_error(e):  # 4xx не транзиентен — ретраи не помогут (§7 п.6)
+                log.warning("OpenAI 4xx, без ретраев: %s", e)
+                raise LlmUnavailable(f"OpenAI отклонил запрос: {e}") from e
+            warning = str(e)  # сеть/5xx/лимиты — ретраим всё
+        log.warning("OpenAI попытка %d/%d: %s", attempt + 1, _ATTEMPTS, warning)
+        if attempt < _ATTEMPTS - 1:
+            await asyncio.sleep(2**attempt)
     raise LlmUnavailable("OpenAI недоступен после ретраев")

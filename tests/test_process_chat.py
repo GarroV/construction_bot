@@ -190,6 +190,29 @@ async def test_ping_after_quiet_week(monkeypatch):
     repo_mocks.mark_posted.assert_not_awaited()
 
 
+async def test_bad_prompt_placeholder_falls_back_to_render(monkeypatch):
+    """Опечатка в плейсхолдере prompts/digest.txt не должна ронять дайджест целиком
+    (§ фикс №5): build_prompt внутри try, KeyError -> fallback-рендер."""
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_WITH_CHANGES))
+    summarize_mock = AsyncMock(return_value="ок")
+    monkeypatch.setattr(scheduler.llm, "summarize", summarize_mock)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+    deps.prompt_template = "{nonexistent_placeholder}"
+
+    errors = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert errors  # ошибка сборки промпта попала в сводку
+    summarize_mock.assert_not_awaited()  # до LLM даже не дошли
+    send_fn.assert_awaited_once()  # карточка всё равно ушла — fallback-рендером
+    text = send_fn.await_args.args[3]
+    assert "без выжимки" in text  # fallback_notice (ru)
+    repo_mocks.mark_posted.assert_awaited_once_with(deps.pool, chat.id)
+
+
 async def test_mixed_chat_renders_no_changes_line(monkeypatch):
     chat = make_chat()
     repo_mocks = patch_repo(monkeypatch, cards=[CARD, CARD2])
@@ -234,3 +257,49 @@ async def test_tick_isolates_chat_errors_and_reports_admin(monkeypatch):
     args = send_fn.await_args.args
     assert args[1] == 42
     assert "ошибк" in args[3].lower()
+
+
+async def test_tick_isolates_invalid_timezone_and_continues(monkeypatch):
+    """Невалидная timezone одного чата не должна глушить весь tick (§ фикс №2)."""
+    chat1 = make_chat(id=1, telegram_chat_id=-100, timezone="Invalid/Zone")
+    chat2 = make_chat(id=2, telegram_chat_id=-200, country="Казахстан")
+    monkeypatch.setattr(scheduler.repo, "list_active_chats", AsyncMock(return_value=[chat1, chat2]))
+
+    process_chat_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(scheduler, "process_chat", process_chat_mock)
+
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn, admin_chat_id=42)
+
+    now = dt.datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
+    await scheduler.tick(deps, now)  # не должен упасть на невалидной tz первого чата
+
+    process_chat_mock.assert_awaited_once()
+    assert process_chat_mock.await_args.args[1].id == chat2.id  # второй чат всё же обработан
+
+    send_fn.assert_awaited_once()
+    args = send_fn.await_args.args
+    assert args[1] == 42
+    assert "кыргызстан" in args[3].lower()  # ошибка первого чата (default country) попала в admin-сводку
+
+
+async def test_admin_summary_escapes_html(monkeypatch):
+    """country — произвольный пользовательский текст, str(e) может содержать <>&
+    (§ фикс №3): без экранирования Telegram роняет can't parse entities."""
+    chat = make_chat()
+    monkeypatch.setattr(scheduler.repo, "list_active_chats", AsyncMock(return_value=[chat]))
+
+    async def fake_process_chat(deps_arg, chat_arg, now_arg):
+        return ["карточка <тест>: сбой"]
+
+    monkeypatch.setattr(scheduler, "process_chat", fake_process_chat)
+
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn, admin_chat_id=42)
+
+    now = dt.datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
+    await scheduler.tick(deps, now)
+
+    text = send_fn.await_args.args[3]
+    assert "&lt;тест&gt;" in text
+    assert "<тест>" not in text

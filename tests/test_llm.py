@@ -1,5 +1,7 @@
 from unittest.mock import AsyncMock
 
+import httpx
+import openai
 import pytest
 from src.bitrix.links import FileLink
 from src.bitrix.parse import ChatMessage
@@ -45,3 +47,38 @@ async def test_summarize_retries_then_raises(monkeypatch):
     with pytest.raises(LlmUnavailable):
         await llm.summarize(client, "gpt-5-mini", "prompt")
     assert client.chat.completions.create.await_count == 3
+
+
+async def test_summarize_empty_content_is_treated_as_failure(monkeypatch):
+    """Пустой content — отказ модели, а не валидный дайджест: ретраим и в конце падаем."""
+    monkeypatch.setattr(llm.asyncio, "sleep", AsyncMock())
+    client = _client_returning("")
+
+    with pytest.raises(LlmUnavailable):
+        await llm.summarize(client, "gpt-5-mini", "prompt")
+    assert client.chat.completions.create.await_count == 3
+
+
+async def test_summarize_bad_request_fails_fast_without_retry(monkeypatch):
+    """4xx от OpenAI — ошибка запроса (не транзиентная), ретраить бессмысленно."""
+    monkeypatch.setattr(llm.asyncio, "sleep", AsyncMock())
+    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    resp = httpx.Response(400, request=req, json={"error": {"message": "bad"}})
+    error = openai.BadRequestError("bad request", response=resp, body=None)
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(side_effect=error)
+
+    with pytest.raises(LlmUnavailable):
+        await llm.summarize(client, "gpt-5-mini", "prompt")
+    assert client.chat.completions.create.await_count == 1
+
+
+async def test_summarize_uses_max_completion_tokens():
+    """gpt-5 отвергает max_tokens с 400 — контракт требует max_completion_tokens."""
+    client = _client_returning("Сводка дня.")
+    await llm.summarize(client, "gpt-5-mini", "prompt")
+
+    _, kwargs = client.chat.completions.create.call_args
+    assert "max_completion_tokens" in kwargs
+    assert "max_tokens" not in kwargs
+    assert kwargs["max_completion_tokens"] == llm._MAX_TOKENS

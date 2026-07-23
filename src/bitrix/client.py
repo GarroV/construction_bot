@@ -32,11 +32,15 @@ class BitrixClient:
     async def call(self, method: str, params: dict | None = None) -> Any:
         for attempt in range(_MAX_ATTEMPTS):
             await self._wait_slot()
-            resp = await self._http.post(self._base + method, json=params or {})
+            try:
+                resp = await self._http.post(self._base + method, json=params or {})
+            except httpx.HTTPError as e:  # сеть/таймаут — честный контракт (§ фикс №4):
+                raise BitrixError("TRANSPORT_ERROR", str(e)) from e  # вызывающие ловят только BitrixError
             if resp.status_code == 503:  # QUERY_LIMIT_EXCEEDED
                 await asyncio.sleep(2**attempt)
                 continue
-            resp.raise_for_status()
+            if not (200 <= resp.status_code < 300):
+                raise BitrixError(f"HTTP_{resp.status_code}", resp.text[:200])
             data = resp.json()
             if "error" in data:
                 raise BitrixError(str(data["error"]), str(data.get("error_description", "")))
