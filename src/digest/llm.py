@@ -39,6 +39,15 @@ def load_prompt(path: str = "prompts/digest.txt") -> str:
     return Path(path).read_text()
 
 
+def _comment_line(m: ChatMessage) -> str:
+    """"автор -> текст" плюс инлайн-пометка вложений своего сообщения (фидбек владельца:
+    LLM должна упоминать файлы в контексте темы, а не безликим списком в конце)."""
+    line = f"{m.author} -> {m.text}"
+    if m.file_names:
+        line += f" [вложения: {', '.join(m.file_names)}]"
+    return line
+
+
 def build_prompt(template: str, delta: CardDelta, language: str, date_str: str) -> str:
     return template.format(
         language=language,
@@ -47,7 +56,7 @@ def build_prompt(template: str, delta: CardDelta, language: str, date_str: str) 
         checklist_done=delta.checklist_done,
         checklist_total=delta.checklist_total,
         task_changes="\n".join(delta.task_changes) or "-",
-        comments="\n".join(f"{m.author} -> {m.text}" for m in delta.comments) or "-",
+        comments="\n".join(_comment_line(m) for m in delta.comments) or "-",
         files="\n".join(f.name for f in delta.files) or "-",
     )
 

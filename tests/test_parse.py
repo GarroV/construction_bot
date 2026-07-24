@@ -33,6 +33,17 @@ def test_parse_chat_messages_filters_system_and_sorts():
     assert msgs[0].file_ids == [777]
 
 
+def test_parse_chat_messages_fills_file_names_from_own_message():
+    """Имена вложений сообщения — для инлайн-упоминания «в контексте» в промпте LLM
+    (фидбек владельца), НЕ только id для resolve_files."""
+    data = json.loads((FIX / "chat_messages.json").read_text())
+
+    msgs = parse.parse_chat_messages(data["messages"], data.get("users", {}))
+
+    assert msgs[0].file_names == ("Нови сад2.png",)
+    assert msgs[1].file_names == ()  # сообщение без вложений
+
+
 @respx.mock
 async def test_fetch_new_history_stops_at_cursor():
     page = {"result": {"list": [{"id": "30"}, {"id": "20"}, {"id": "10"}]}}  # desc
@@ -115,6 +126,17 @@ def test_parse_comments_sorts_and_cleans_bbcode():
     assert msgs[1].text == "Пётр Петров написал:\nнужно согласовать\nСогласовано."
     assert msgs[2].text == "Иван Иванов, согласен, сделаем к пятнице. Смотри план."
     assert all(m.file_ids == [] for m in msgs)  # файлы отдельно — parse_comment_files
+
+
+def test_parse_comments_fills_file_names_from_own_attached_objects():
+    """file_names — имена вложений СВОЕГО комментария (id=101 несёт план.pdf), а не
+    общий пул ATTACHED_OBJECTS всех комментариев (тот собирает parse_comment_files)."""
+    records = json.loads((FIX / "comments_page.json").read_text())
+
+    msgs = parse.parse_comments(records)
+
+    assert msgs[0].file_names == () and msgs[2].file_names == ()  # id=100, id=103 без вложений
+    assert msgs[1].file_names == ("план.pdf",)  # id=101 — своё ATTACHED_OBJECTS
 
 
 def test_parse_comment_files_names_only_no_secret_leak():

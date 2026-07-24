@@ -70,7 +70,8 @@ async def test_collect_card_delta_old_card_uses_comments_and_skips_chat(monkeypa
                     last_comment_id=100)
     delta = await collector.collect_card_delta(bx, CARD, cur)
 
-    assert delta.comments == [ChatMessage(id=103, author="Пётр", text="Иван, привет", file_ids=[])]
+    assert delta.comments == [ChatMessage(id=103, author="Пётр", text="Иван, привет", file_ids=[],
+                                          file_names=("план.pdf",))]
     assert delta.files == [FileLink(name="план.pdf", url=None)]
     assert delta.new_comment_id == 103
     assert delta.new_message_id == cur.last_message_id  # старая карточка: курсор чата не двигается

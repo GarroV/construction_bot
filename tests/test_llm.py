@@ -26,6 +26,33 @@ def test_build_prompt_fills_placeholders():
     assert "план.pdf" in prompt and "{" not in prompt  # все плейсхолдеры закрыты
 
 
+def test_build_prompt_inlines_attachment_names_when_present():
+    """Фидбек владельца: LLM должна упоминать вложения в контексте темы, а не
+    безликим списком в конце — build_prompt помечает строку комментария file_names."""
+    template = llm.load_prompt()
+    delta = CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[],
+        comments=[ChatMessage(
+            id=1, author="Иван", text="пароль указан", file_ids=[],
+            file_names=("Нови сад2 1.png", "Нови сад2.png"),
+        )],
+        checklist_done=0, checklist_total=0, files=[],
+        new_history_id=0, new_message_id=0,
+    )
+
+    prompt = llm.build_prompt(template, delta, language="ru", date_str="2026-07-21")
+
+    assert "Иван -> пароль указан [вложения: Нови сад2 1.png, Нови сад2.png]" in prompt
+
+
+def test_build_prompt_omits_attachment_marker_when_no_files():
+    template = llm.load_prompt()
+    prompt = llm.build_prompt(template, DELTA, language="ru", date_str="2026-07-21")
+
+    # DELTA.comments[0].file_names пуст — строка комментария без маркера вложений
+    assert "Плитку согласовали [вложения" not in prompt
+
+
 def _client_returning(text):
     resp = AsyncMock()
     resp.choices = [AsyncMock(message=AsyncMock(content=text))]
