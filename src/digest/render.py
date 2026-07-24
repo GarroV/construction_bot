@@ -35,9 +35,15 @@ def card_message(delta: CardDelta, summary: str | None, task_url: str, locales, 
         name = html.escape(f.name)
         if f.url:  # кликабельная ссылка — всегда ценность
             lines.append(f'📎 <a href="{html.escape(f.url, quote=True)}">{name}</a>')
-        elif summary is None:  # fallback без LLM: в тексте вложения не упомянуты — не терять
+        elif summary is None or f.name not in summary:
+            # Страховка от молчаливой потери (§7): без ссылки файл добавляем, если LLM не
+            # упомянула его имя дословно в тексте выжимки — либо выжимки вообще нет
+            # (fallback). Промпт просит LLM в насыщенный день приоритизировать и опускать
+            # мелочи — файл может не попасть в текст: тогда 📎-строка обязана его показать,
+            # а не молча потерять. `f.name not in summary` — по сырому (неэкранированному)
+            # summary: LLM инструктирована упоминать имена дословно.
             lines.append(f"📎 {name}")
-        # файл без ссылки при живой LLM-выжимке не дублируем: он уже упомянут в контексте
+        # иначе — файл уже упомянут дословно в тексте выжимки: 📎-строка была бы дублем
     return clip("\n".join(lines))
 
 

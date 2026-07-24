@@ -20,7 +20,9 @@ def test_card_message_with_summary_escapes_and_links():
     assert '🏗 <b><a href="https://p/task/8017/">Бишкек &lt;8&gt;</a></b>' in msg
     assert "Сводка &lt;дня&gt; &amp; выводы" in msg          # LLM-текст экранирован
     assert '<a href="https://p/disk/1">план&lt;1&gt;.pdf</a>' in msg
-    assert "без ссылки" not in msg  # файл без url при живой выжимке не дублируем (он в контексте)
+    # summary не упоминает "без ссылки" дословно -> 📎-страховка обязана его показать
+    # (§7: дельта не теряется молча), иначе имя файла пропало бы без следа
+    assert "📎 без ссылки" in msg
     assert 'href=""' not in msg
 
 
@@ -104,3 +106,34 @@ def test_fallback_keeps_linkless_files_visible():
     """Fallback без LLM: вложения не упомянуты в тексте — 📎-список обязан их сохранить."""
     msg = render.card_message(DELTA, None, "https://p/task/8017/", LOCALES, "ru")
     assert "📎 без ссылки" in msg
+
+
+def test_card_message_hides_linkless_file_mentioned_verbatim_in_summary():
+    """LLM упомянула имя файла дословно в тексте выжимки -> 📎-страховка не дублирует
+    (владелец: без дублей — файл уже в контексте)."""
+    delta = CardDelta(
+        task_id=1, alias="X", task_changes=[], comments=[],
+        checklist_done=0, checklist_total=0,
+        files=[FileLink(name="план.pdf", url=None)],
+        new_history_id=0, new_message_id=0,
+    )
+    msg = render.card_message(
+        delta, "Обсудили план.pdf, согласовали сроки", "https://p/task/1/", LOCALES, "ru"
+    )
+    assert "📎 план.pdf" not in msg
+    assert msg.count("план.pdf") == 1  # только в тексте выжимки, без второго упоминания
+
+
+def test_card_message_shows_linkless_file_not_mentioned_in_summary():
+    """LLM НЕ упомянула файл (например, приоритизация в насыщенный день по новому
+    промпту) -> 📎-строка обязана подстраховать: имя не должно пропасть молча (§7)."""
+    delta = CardDelta(
+        task_id=1, alias="X", task_changes=[], comments=[],
+        checklist_done=0, checklist_total=0,
+        files=[FileLink(name="план.pdf", url=None)],
+        new_history_id=0, new_message_id=0,
+    )
+    msg = render.card_message(
+        delta, "Обсудили общий прогресс, всё по графику", "https://p/task/1/", LOCALES, "ru"
+    )
+    assert "📎 план.pdf" in msg
