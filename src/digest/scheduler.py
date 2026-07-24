@@ -99,17 +99,27 @@ async def _discover_subtasks(deps: Deps, chat: ChatRow, cards: list[CardRow]) ->
 
 
 async def process_chat(
-    deps: Deps, chat: ChatRow, now_utc: dt.datetime, mark_run: bool = True
+    deps: Deps, chat: ChatRow, now_utc: dt.datetime, mark_run: bool = True,
+    only_task_id: int | None = None,
 ) -> tuple[list[str], bool]:
     """Прогон дайджеста чата. mark_run=False — «Отчёт сейчас» (/report, §5): курсоры
     двигаются как в обычном тике, но last_digest_date НЕ трогаем (дневной дайджест по
     расписанию должен сработать сам) и пинг-ветку пропускаем (иначе /report мог бы
-    «съесть» недельный пинг за счёт mark_posted, который остаётся безусловным)."""
+    «съесть» недельный пинг за счёт mark_posted, который остаётся безусловным).
+
+    only_task_id (§5, выбор карточки для отчёта — кнопка/команда с аргументом): если
+    задан, обрабатывается ТОЛЬКО эта карточка чата — соседние карточки (в т.ч. их
+    блоки «изменений нет») в сообщение вообще не попадают, а дискавери подзадач
+    пропускается целиком (точечный отчёт должен быть быстрым, обход API подзадач ему
+    не нужен). При None (обычный тик/полный отчёт) — поведение без изменений."""
     errors: list[str] = []
     local_date = now_utc.astimezone(ZoneInfo(chat.timezone)).date()
     lang = chat.digest_language
     cards = await repo.list_active_cards(deps.pool, chat.id)
-    errors += await _discover_subtasks(deps, chat, cards)
+    if only_task_id is None:
+        errors += await _discover_subtasks(deps, chat, cards)
+    else:
+        cards = [c for c in cards if c.bitrix_task_id == only_task_id]
 
     deltas = []
     for card in cards:

@@ -1,6 +1,7 @@
 """Инлайн-меню (menu.py): клавиатуры, reply-роутинг по точному тексту промпта,
 callback-диспетчер (права нажавшего, устойчивость к мусорному callback_data).
 repo/ensure_chat*/process_chat заменены фейками — без сети и БД (как test_commands.py)."""
+import datetime as dt
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -9,6 +10,7 @@ from src.repo import CardRow
 from src.telegram import menu
 
 LOCALES = load_locales()
+UTC = dt.timezone.utc
 
 
 def make_deps(**over):
@@ -26,7 +28,10 @@ def make_deps(**over):
     return deps
 
 
-CHAT = SimpleNamespace(id=1, telegram_chat_id=-100, message_thread_id=7, digest_language="ru")
+CHAT = SimpleNamespace(
+    id=1, telegram_chat_id=-100, message_thread_id=7, digest_language="ru",
+    timezone="UTC", last_posted_at=None,
+)
 
 CARDS = [
     CardRow(id=1, bitrix_task_id=8017, chat_id=1, alias="Бишкек 8", active=True),
@@ -175,31 +180,116 @@ async def test_route_reply_restricted_chat_denies(monkeypatch):
     message.reply.assert_awaited_once_with(t(LOCALES, "ru", "restricted_denied"))
 
 
-# --- m:report: posted=False -> report_empty в топик; errors -> report_errors ---
+# --- m:report: НЕ гонит отчёт — сначала выбор карточки (владелец, §5) ---
 
-async def test_dispatch_callback_report_posted_false_sends_report_empty(monkeypatch):
+async def test_dispatch_callback_report_shows_pick_keyboard(monkeypatch):
+    """Клика по «📊 Отчёт сейчас» больше не запускает прогон напрямую — сперва выбор
+    карточки (report_pick), как у send_rm_keyboard/send_lang_keyboard."""
+    deps = make_deps()
+    monkeypatch.setattr(menu, "ensure_chat_for_callback", AsyncMock(return_value=CHAT))
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=CARDS))
+    process_chat_mock = AsyncMock()
+    monkeypatch.setattr(menu, "process_chat", process_chat_mock)
+
+    callback = _callback("m:report")
+    await menu.dispatch_callback(deps, callback)
+
+    callback.answer.assert_awaited_once_with()  # без текста — прогон ещё не запущен
+    process_chat_mock.assert_not_awaited()
+    callback.message.answer.assert_awaited_once()
+    args, kwargs = callback.message.answer.await_args
+    assert args[0] == t(LOCALES, "ru", "report_pick")
+    kb = kwargs["reply_markup"]
+    data = {btn.callback_data for row in kb.inline_keyboard for btn in row}
+    assert data == {"m:report:all", "m:report:8017", "m:report:8018", "m:cancel"}
+
+
+# --- m:report:all: posted=False -> report_empty в топик; errors -> report_errors ---
+
+async def test_dispatch_callback_report_all_posted_false_sends_report_empty(monkeypatch):
     deps = make_deps()
     monkeypatch.setattr(menu, "ensure_chat_for_callback", AsyncMock(return_value=CHAT))
     monkeypatch.setattr(menu, "process_chat", AsyncMock(return_value=([], False)))
 
-    callback = _callback("m:report")
+    callback = _callback("m:report:all")
     await menu.dispatch_callback(deps, callback)
 
     callback.answer.assert_awaited_once_with(t(LOCALES, "ru", "report_running"))
     deps.send_fn.assert_awaited_once_with(
-        deps.bot, CHAT.telegram_chat_id, CHAT.message_thread_id, t(LOCALES, "ru", "report_empty"),
+        deps.bot, CHAT.telegram_chat_id, CHAT.message_thread_id,
+        t(LOCALES, "ru", "report_empty_never"),  # CHAT.last_posted_at is None
     )
 
 
-async def test_dispatch_callback_report_posted_true_sends_nothing_extra(monkeypatch):
+async def test_dispatch_callback_report_all_posted_true_sends_nothing_extra(monkeypatch):
     deps = make_deps()
     monkeypatch.setattr(menu, "ensure_chat_for_callback", AsyncMock(return_value=CHAT))
     monkeypatch.setattr(menu, "process_chat", AsyncMock(return_value=([], True)))
 
-    callback = _callback("m:report")
+    callback = _callback("m:report:all")
     await menu.dispatch_callback(deps, callback)
 
     deps.send_fn.assert_not_awaited()  # дайджест уже ушёл своим путём внутри process_chat
+
+
+async def test_dispatch_callback_report_all_passes_only_task_id_none(monkeypatch):
+    deps = make_deps()
+    monkeypatch.setattr(menu, "ensure_chat_for_callback", AsyncMock(return_value=CHAT))
+    process_chat_mock = AsyncMock(return_value=([], True))
+    monkeypatch.setattr(menu, "process_chat", process_chat_mock)
+
+    callback = _callback("m:report:all")
+    await menu.dispatch_callback(deps, callback)
+
+    assert process_chat_mock.await_args.kwargs["only_task_id"] is None
+
+
+# --- m:report:<id>: точечный отчёт по одной карточке ---
+
+async def test_dispatch_callback_report_specific_card_runs_only_task_id(monkeypatch):
+    deps = make_deps()
+    monkeypatch.setattr(menu, "ensure_chat_for_callback", AsyncMock(return_value=CHAT))
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=CARDS))
+    process_chat_mock = AsyncMock(return_value=([], True))
+    monkeypatch.setattr(menu, "process_chat", process_chat_mock)
+
+    callback = _callback("m:report:8017")
+    await menu.dispatch_callback(deps, callback)
+
+    callback.answer.assert_awaited_once_with(t(LOCALES, "ru", "report_running"))
+    process_chat_mock.assert_awaited_once()
+    assert process_chat_mock.await_args.kwargs["only_task_id"] == 8017
+
+
+async def test_dispatch_callback_report_garbage_task_id_is_safe(monkeypatch):
+    """Мусорный суффикс (m:report:abc) — безопасно: часики сняты, прогон не запущен."""
+    deps = make_deps()
+    monkeypatch.setattr(menu, "ensure_chat_for_callback", AsyncMock(return_value=CHAT))
+    process_chat_mock = AsyncMock()
+    monkeypatch.setattr(menu, "process_chat", process_chat_mock)
+
+    callback = _callback("m:report:abc")
+    await menu.dispatch_callback(deps, callback)  # не должно поднять исключение
+
+    callback.answer.assert_awaited_once_with()
+    process_chat_mock.assert_not_awaited()
+    deps.send_fn.assert_not_awaited()
+
+
+async def test_dispatch_callback_report_unknown_task_id_is_safe(monkeypatch):
+    """Валидный по формату, но не активный в чате task_id (карточку успели убрать между
+    показом клавиатуры и нажатием) — тоже безопасно игнорируется."""
+    deps = make_deps()
+    monkeypatch.setattr(menu, "ensure_chat_for_callback", AsyncMock(return_value=CHAT))
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=CARDS))  # 8017/8018 только
+    process_chat_mock = AsyncMock()
+    monkeypatch.setattr(menu, "process_chat", process_chat_mock)
+
+    callback = _callback("m:report:9999")
+    await menu.dispatch_callback(deps, callback)
+
+    callback.answer.assert_awaited_once_with()
+    process_chat_mock.assert_not_awaited()
 
 
 async def test_run_report_sends_report_errors_when_errors_present(monkeypatch):
@@ -221,6 +311,158 @@ async def test_run_report_no_errors_sends_nothing_when_posted(monkeypatch):
     await menu.run_report(deps, CHAT)
 
     deps.send_fn.assert_not_awaited()
+
+
+async def test_run_report_passes_only_task_id_through_to_process_chat(monkeypatch):
+    deps = make_deps()
+    process_chat_mock = AsyncMock(return_value=([], True))
+    monkeypatch.setattr(menu, "process_chat", process_chat_mock)
+
+    await menu.run_report(deps, CHAT, only_task_id=8017)
+
+    assert process_chat_mock.await_args.kwargs["only_task_id"] == 8017
+
+
+# --- report_empty: дата последнего дайджеста в таймзоне чата / ветка "никогда" ---
+
+async def test_report_empty_includes_formatted_date_in_chat_timezone(monkeypatch):
+    """Владелец: голое «изменений нет» неинформативно — нужна дата в ТАЙМЗОНЕ ЧАТА,
+    формат «ДД.ММ ЧЧ:ММ»."""
+    chat = SimpleNamespace(
+        id=1, telegram_chat_id=-100, message_thread_id=7, digest_language="ru",
+        timezone="Europe/Belgrade",
+        last_posted_at=dt.datetime(2026, 7, 20, 12, 30, tzinfo=UTC),  # UTC+2 летом -> 14:30
+    )
+    deps = make_deps()
+    monkeypatch.setattr(menu, "process_chat", AsyncMock(return_value=([], False)))
+
+    await menu.run_report(deps, chat)
+
+    text = deps.send_fn.await_args.args[3]
+    assert text == t(LOCALES, "ru", "report_empty", date="20.07 14:30")
+
+
+async def test_report_empty_never_branch_when_last_posted_at_is_none(monkeypatch):
+    """last_posted_at IS NULL (чат только подключили) -> отдельный текст без даты."""
+    chat = SimpleNamespace(
+        id=1, telegram_chat_id=-100, message_thread_id=7, digest_language="ru",
+        timezone="UTC", last_posted_at=None,
+    )
+    deps = make_deps()
+    monkeypatch.setattr(menu, "process_chat", AsyncMock(return_value=([], False)))
+
+    await menu.run_report(deps, chat)
+
+    text = deps.send_fn.await_args.args[3]
+    assert text == t(LOCALES, "ru", "report_empty_never")
+
+
+# --- send_report_pick: клавиатура «По чему отчёт?» ---
+
+async def test_send_report_pick_builds_keyboard_with_all_and_active_cards(monkeypatch):
+    deps = make_deps()
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=CARDS))
+    target = _msg(reply_text=None)
+
+    await menu.send_report_pick(deps, target, CHAT)
+
+    target.answer.assert_awaited_once()
+    args, kwargs = target.answer.await_args
+    assert args[0] == t(LOCALES, "ru", "report_pick")
+    kb = kwargs["reply_markup"]
+    flat = [btn for row in kb.inline_keyboard for btn in row]
+    by_data = {btn.callback_data: btn.text for btn in flat}
+    assert by_data["m:report:all"] == t(LOCALES, "ru", "btn_report_all")
+    assert by_data["m:report:8017"] == "Бишкек 8 (#8017)"
+    assert by_data["m:report:8018"] == "Бишкек 9 (#8018)"
+    assert by_data["m:cancel"] == t(LOCALES, "ru", "btn_cancel")
+
+
+async def test_send_report_pick_with_no_active_cards_still_offers_all_and_cancel(monkeypatch):
+    deps = make_deps()
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=[]))
+    target = _msg(reply_text=None)
+
+    await menu.send_report_pick(deps, target, CHAT)
+
+    kwargs = target.answer.await_args.kwargs
+    data = {btn.callback_data for row in kwargs["reply_markup"].inline_keyboard for btn in row}
+    assert data == {"m:report:all", "m:cancel"}
+
+
+# --- /report (команда): без аргументов -> выбор; со ссылкой/ID -> отчёт точечный ---
+
+async def test_cmd_report_no_args_shows_pick(monkeypatch):
+    deps = make_deps()
+    monkeypatch.setattr(menu, "ensure_chat", AsyncMock(return_value=CHAT))
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=CARDS))
+    process_chat_mock = AsyncMock()
+    monkeypatch.setattr(menu, "process_chat", process_chat_mock)
+
+    message = _msg(reply_text=None, text="/report")
+    await menu._cmd_report(deps, message)
+
+    process_chat_mock.assert_not_awaited()
+    message.answer.assert_awaited_once()
+    args, kwargs = message.answer.await_args
+    assert args[0] == t(LOCALES, "ru", "report_pick")
+
+
+async def test_cmd_report_with_link_runs_direct_report(monkeypatch):
+    """/report со ссылкой на карточку — отчёт сразу по ней (§5, _parse_task_ref)."""
+    deps = make_deps()
+    monkeypatch.setattr(menu, "ensure_chat", AsyncMock(return_value=CHAT))
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=CARDS))
+    process_chat_mock = AsyncMock(return_value=([], True))
+    monkeypatch.setattr(menu, "process_chat", process_chat_mock)
+
+    url = "https://b24.dodoteam.ru/company/personal/user/1650/tasks/task/view/8017/"
+    message = _msg(reply_text=None, text=f"/report {url}")
+    await menu._cmd_report(deps, message)
+
+    message.reply.assert_awaited_once_with(t(LOCALES, "ru", "report_running"))
+    process_chat_mock.assert_awaited_once()
+    assert process_chat_mock.await_args.kwargs["only_task_id"] == 8017
+
+
+async def test_cmd_report_with_bare_id_runs_direct_report(monkeypatch):
+    deps = make_deps()
+    monkeypatch.setattr(menu, "ensure_chat", AsyncMock(return_value=CHAT))
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=CARDS))
+    process_chat_mock = AsyncMock(return_value=([], True))
+    monkeypatch.setattr(menu, "process_chat", process_chat_mock)
+
+    message = _msg(reply_text=None, text="/report 8018")
+    await menu._cmd_report(deps, message)
+
+    process_chat_mock.assert_awaited_once()
+    assert process_chat_mock.await_args.kwargs["only_task_id"] == 8018
+
+
+async def test_cmd_report_unknown_card_replies_report_unknown_card(monkeypatch):
+    """Аргумент разобрался в ID, но карточка не отслеживается в этом топике —
+    remove_not_tracked-подобный ответ (report_unknown_card)."""
+    deps = make_deps()
+    monkeypatch.setattr(menu, "ensure_chat", AsyncMock(return_value=CHAT))
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=CARDS))  # 8017/8018 только
+    process_chat_mock = AsyncMock()
+    monkeypatch.setattr(menu, "process_chat", process_chat_mock)
+
+    message = _msg(reply_text=None, text="/report 9999")
+    await menu._cmd_report(deps, message)
+
+    message.reply.assert_awaited_once_with(t(LOCALES, "ru", "report_unknown_card"))
+    process_chat_mock.assert_not_awaited()
+
+
+async def test_cmd_report_restricted_chat_denies(monkeypatch):
+    deps = make_deps()
+    monkeypatch.setattr(menu, "ensure_chat", AsyncMock(return_value=None))
+
+    message = _msg(reply_text=None, text="/report")
+    await menu._cmd_report(deps, message)
+
+    message.reply.assert_awaited_once_with(t(LOCALES, "ru", "restricted_denied"))
 
 
 # --- m:rm: кнопки по активным карточкам / пусто / мусорный суффикс ---

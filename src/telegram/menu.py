@@ -28,7 +28,7 @@ commands.build_router (голая команда) — один текст, од�
 
 Циклический импорт: menu.py импортирует точечно только «ядра» из commands.py
 (ensure_chat, ensure_chat_for_callback, _addressed_to_me, handle_add, handle_time,
-_args_of) — их значения не нужны build_router. commands.py, наоборот, использует
+_args_of, _parse_task_ref) — их значения не нужны build_router. commands.py, наоборот, использует
 build_panel_keyboard()/send_add_prompt/send_time_prompt/send_lang_keyboard/
 send_rm_keyboard отсюда только внутри build_router() (локальный импорт по месту
 вызова, а не на уровне модуля) — к моменту вызова оба модуля уже полностью загружены,
@@ -36,6 +36,7 @@ send_rm_keyboard отсюда только внутри build_router() (лока
 """
 import datetime as dt
 import logging
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -52,6 +53,8 @@ from src.i18n import t
 from src.repo import CardRow, ChatRow
 from src.telegram.commands import (
     _addressed_to_me,
+    _args_of,
+    _parse_task_ref,
     ensure_chat,
     ensure_chat_for_callback,
     handle_add,
@@ -87,6 +90,19 @@ def build_rm_keyboard(locales, lang: str, cards: list[CardRow]) -> InlineKeyboar
     rows = [
         [InlineKeyboardButton(text=f"{c.alias or '#'} (#{c.bitrix_task_id})",
                               callback_data=f"m:rm:{c.bitrix_task_id}")]
+        for c in cards
+    ]
+    rows.append([InlineKeyboardButton(text=t(locales, lang, "btn_cancel"), callback_data="m:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_report_keyboard(locales, lang: str, cards: list[CardRow]) -> InlineKeyboardMarkup:
+    """[По всем] + по одной кнопке на каждую активную карточку + [Отмена] (владелец:
+    «📊 Отчёт сейчас» должен давать выбор карточки, а не молча гнать по всему чату)."""
+    rows = [[InlineKeyboardButton(text=t(locales, lang, "btn_report_all"), callback_data="m:report:all")]]
+    rows += [
+        [InlineKeyboardButton(text=f"{c.alias or '#'} (#{c.bitrix_task_id})",
+                              callback_data=f"m:report:{c.bitrix_task_id}")]
         for c in cards
     ]
     rows.append([InlineKeyboardButton(text=t(locales, lang, "btn_cancel"), callback_data="m:cancel")])
@@ -134,15 +150,43 @@ async def send_rm_keyboard(deps, target: Message, chat: ChatRow) -> None:
     )
 
 
-async def run_report(deps, chat: ChatRow) -> None:
-    """Общее ядро для /report (текстом) и m:report (кнопкой): тот же пайплайн, что и
-    у планировщика, но mark_run=False (§5) — курсоры двигаются, last_digest_date нет."""
+async def send_report_pick(deps, target: Message, chat: ChatRow) -> None:
+    """«По чему отчёт?» — диалоговый флоу для голого /report И кнопки «📊 Отчёт сейчас»
+    (владелец: кнопка не должна молча гнать отчёт по всему чату). Общий код, как у
+    send_rm_keyboard/send_lang_keyboard выше (паттерн send_*, DRY)."""
+    lang = chat.digest_language
+    cards = await repo.list_active_cards(deps.pool, chat.id)
+    await target.answer(
+        t(deps.locales, lang, "report_pick"),
+        reply_markup=build_report_keyboard(deps.locales, lang, cards),
+    )
+
+
+_REPORT_EMPTY_DATE_FMT = "%d.%m %H:%M"
+
+
+def _report_empty_text(deps, chat: ChatRow) -> str:
+    """report_empty с датой последнего дайджеста в таймзоне чата (владелец: голое
+    «изменений нет» неинформативно — с какого момента?). last_posted_at IS NULL
+    (чат подключили, но ни один дайджест ещё не ушёл) -> отдельный текст
+    report_empty_never, без даты-заглушки."""
+    lang = chat.digest_language
+    if chat.last_posted_at is None:
+        return t(deps.locales, lang, "report_empty_never")
+    local = chat.last_posted_at.astimezone(ZoneInfo(chat.timezone))
+    return t(deps.locales, lang, "report_empty", date=local.strftime(_REPORT_EMPTY_DATE_FMT))
+
+
+async def run_report(deps, chat: ChatRow, only_task_id: int | None = None) -> None:
+    """Общее ядро для /report (текстом) и m:report:*-кнопок (§5): тот же пайплайн, что и
+    у планировщика, но mark_run=False — курсоры двигаются, last_digest_date нет.
+    only_task_id — точечный отчёт по одной карточке (см. process_chat), None — по всем."""
     now_utc = dt.datetime.now(dt.timezone.utc)
-    errors, posted = await process_chat(deps, chat, now_utc, mark_run=False)
+    errors, posted = await process_chat(deps, chat, now_utc, mark_run=False, only_task_id=only_task_id)
     if not posted:
         await deps.send_fn(
             deps.bot, chat.telegram_chat_id, chat.message_thread_id,
-            t(deps.locales, chat.digest_language, "report_empty"),
+            _report_empty_text(deps, chat),
         )
     if errors:
         log.warning("report: чат %s: %s", chat.id, errors)
@@ -173,14 +217,27 @@ async def _cmd_menu(deps, message: Message) -> None:
 
 
 async def _cmd_report(deps, message: Message) -> None:
+    """Без аргументов — тот же выбор карточки, что и у кнопки «📊 Отчёт сейчас»
+    (send_report_pick). С аргументом (число или ссылка на карточку, §5) — отчёт сразу
+    по этой карточке; если она не отслеживается в топике — report_unknown_card, по
+    аналогии с remove_not_tracked."""
     if not _addressed_to_me(message, getattr(deps, "bot_username", "")):
         return
     chat = await ensure_chat(deps, message)
     if chat is None:
         await _deny_restricted(deps, message)
         return
+    args = _args_of(message)
+    task_id = _parse_task_ref(args) if args.strip() else None
+    if task_id is None:
+        await send_report_pick(deps, message, chat)
+        return
+    cards = await repo.list_active_cards(deps.pool, chat.id)
+    if not any(c.bitrix_task_id == task_id for c in cards):
+        await message.reply(t(deps.locales, chat.digest_language, "report_unknown_card"))
+        return
     await message.reply(t(deps.locales, chat.digest_language, "report_running"))
-    await run_report(deps, chat)
+    await run_report(deps, chat, only_task_id=task_id)
 
 
 async def dispatch_callback(deps, callback: CallbackQuery) -> None:
@@ -235,8 +292,24 @@ async def dispatch_callback(deps, callback: CallbackQuery) -> None:
         await callback.answer()
         await message.edit_text(t(deps.locales, lang, "menu_cancelled"))
     elif data == "m:report":
+        # владелец: кнопка не должна молча гнать отчёт по всему чату — сперва выбор.
+        await callback.answer()
+        await send_report_pick(deps, message, chat)
+    elif data == "m:report:all":
         await callback.answer(t(deps.locales, lang, "report_running"))
         await run_report(deps, chat)
+    elif data.startswith("m:report:"):
+        try:
+            task_id = int(data.split(":", 2)[2])
+        except (IndexError, ValueError):
+            await callback.answer()
+            return  # мусорный callback_data (например m:report:abc) — молча игнорируем (паттерн m:rm)
+        cards = await repo.list_active_cards(deps.pool, chat.id)
+        if not any(c.bitrix_task_id == task_id for c in cards):
+            await callback.answer()
+            return  # карточка убрана между показом клавиатуры и нажатием — тоже молча игнорируем
+        await callback.answer(t(deps.locales, lang, "report_running"))
+        await run_report(deps, chat, only_task_id=task_id)
     else:
         await callback.answer()  # неизвестный callback_data — просто снимаем часики
 

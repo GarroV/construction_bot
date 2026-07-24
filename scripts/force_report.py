@@ -5,8 +5,10 @@
 
 --rewind N — откатить курсор комментариев на N назад перед прогоном (по умолчанию 0):
 удобно для демонстрации/отладки, чтобы в отчёт гарантированно попали последние N
-комментариев. Курсор истории не откатывается. Семантика прогона — как у «Отчёта
-сейчас» (§5): process_chat(mark_run=False) — дневное расписание не ломается.
+комментариев. Курсор истории не откатывается. Семантика прогона — как у точечного
+«Отчёта сейчас» по одной карточке (§5): process_chat(mark_run=False, only_task_id=task_id)
+— в отчёт попадает ТОЛЬКО эта карточка (соседние карточки того же топика не примешиваются),
+дневное расписание не ломается.
 """
 import argparse
 import asyncio
@@ -20,7 +22,8 @@ from src.bitrix.client import BitrixClient
 from src.config import load_settings
 from src.digest import llm as llm_mod
 from src.digest.scheduler import Deps, dry_run_send, process_chat
-from src.i18n import load_locales, t
+from src.i18n import load_locales
+from src.telegram.menu import _report_empty_text
 
 
 async def main(task_id: int, rewind: int) -> None:
@@ -69,11 +72,14 @@ async def main(task_id: int, rewind: int) -> None:
             chat = chats.get(r["chat_id"])
             if chat is None:
                 continue
-            errors, posted = await process_chat(deps, chat, now, mark_run=False)
+            # only_task_id=task_id (§5, выбор карточки для отчёта): скрипт форсирует
+            # отчёт ИМЕННО по этой карточке, а не по всему чату — иначе в форс-отчёт
+            # заодно попадали бы изменения других карточек того же топика.
+            errors, posted = await process_chat(deps, chat, now, mark_run=False, only_task_id=task_id)
             if not posted:
                 await deps.send_fn(
                     deps.bot, chat.telegram_chat_id, chat.message_thread_id,
-                    t(deps.locales, chat.digest_language, "report_empty"),
+                    _report_empty_text(deps, chat),
                 )
             print(f"chat {chat.id} ({chat.country}): posted={posted}, errors={errors or 'нет'}")
         await deps.bot.session.close()

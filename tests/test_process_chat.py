@@ -576,6 +576,73 @@ async def test_discovery_skips_auto_cards_as_roots():
     assert errors == []
 
 
+# --- only_task_id: точечный отчёт по одной карточке (§5, выбор карточки для отчёта) ---
+
+
+async def test_only_task_id_filters_to_single_card_and_skips_discovery(monkeypatch):
+    """only_task_id — только эта карточка собирается/шлётся, соседняя (в т.ч. без
+    изменений) в сообщение не попадает вовсе, дискавери подзадач не вызывается."""
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD, CARD2])
+    list_subtasks_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(scheduler.methods, "list_subtasks", list_subtasks_mock)
+
+    async def fake_collect(bx, card, cursor):
+        return DELTA_WITH_CHANGES if card.bitrix_task_id == 8017 else DELTA_EMPTY_2
+
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", fake_collect)
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(
+        deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC), mark_run=False, only_task_id=8017,
+    )
+
+    assert not errors
+    assert posted is True
+    assert send_fn.await_count == 1
+    text = send_fn.await_args.args[3]
+    assert "Бишкек 8" in text
+    assert "Бишкек 9" not in text  # соседняя карточка не попала в отчёт вовсе
+    list_subtasks_mock.assert_not_awaited()  # дискавери подзадач пропущен целиком
+    repo_mocks.advance_cursor.assert_awaited_once_with(deps.pool, 8017, chat.id, 31, 202, 0)
+
+
+async def test_only_task_id_no_changes_reports_nothing_posted(monkeypatch):
+    """Выбранная карточка без изменений -> posted=False, ничего не отправлено (блок
+    «изменений нет» соседней карточки тоже не должен всплыть — её и в cards-то нет)."""
+    chat = make_chat()
+    patch_repo(monkeypatch, cards=[CARD, CARD2])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", AsyncMock(return_value=DELTA_EMPTY))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(
+        deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC), mark_run=False, only_task_id=8017,
+    )
+
+    assert not errors
+    assert posted is False
+    send_fn.assert_not_awaited()
+
+
+async def test_only_task_id_none_keeps_previous_behavior(monkeypatch):
+    """only_task_id по умолчанию (None) — дискавери по-прежнему вызывается, поведение
+    не меняется."""
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_EMPTY))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    scheduler.methods.list_subtasks.assert_awaited_once()
+    repo_mocks.mark_digest_run.assert_awaited_once()
+
+
 async def test_discovery_calls_list_subtasks_only_for_manual_cards(monkeypatch):
     chat = make_chat()
     auto_card = CardRow(
