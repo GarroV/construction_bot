@@ -122,6 +122,10 @@ async def process_chat(
 
     posted = False
     if any(d.has_changes for _, d in deltas):  # §7 п.5: полностью пустой чат молчит
+        # Фаза 1: рендер блоков карточек — per-card try/except как раньше, сбой одной
+        # карточки изолирован (её блок выпадает, попадает в errors, остальные едут дальше
+        # в общем сообщении чата, §7 п.6 fallback-путь не затронут).
+        blocks: list[tuple[llm.CardDelta, str]] = []
         for card, delta in deltas:
             try:
                 url = links.task_url(deps.settings.bitrix_webhook_url,
@@ -131,9 +135,25 @@ async def process_chat(
                 else:
                     summary = await _summarize_or_none(deps, delta, lang, str(local_date), errors, chat)
                     text = render.card_message(delta, summary, url, deps.locales, lang)
+                blocks.append((delta, text))
+            except Exception as e:
+                log.exception("рендер карточки %s/%s", chat.id, delta.task_id)
+                errors.append(f"{_chat_label(chat)}: карточка #{delta.task_id}: {e}")
 
+        # Фаза 2: сплит по границам блоков (§7 п.7) — минимальное число сообщений; всё,
+        # что влезло, уходит одним сообщением.
+        chunks = render.chunk_blocks([text for _, text in blocks])
+
+        # Фаза 3: последовательная отправка чанков. Granularity сдвига курсора укрупнена
+        # с карточки до чанка (§7 п.8): курсоры ВСЕХ карточек чанка двигаются только после
+        # успешной отправки сообщения, в которое вошёл их блок; сбой чанка не двигает ни
+        # один из его курсоров (дельта уедет завтра), но не блокирует остальные чанки —
+        # кроме forbidden, где чат деактивирован и дальнейшие чанки не имеют смысла.
+        for chunk_indices in chunks:
+            chunk_text = "\n\n".join(blocks[i][1] for i in chunk_indices)
+            try:
                 result = await deps.send_fn(deps.bot, chat.telegram_chat_id,
-                                            chat.message_thread_id, text)
+                                            chat.message_thread_id, chunk_text)
                 if result.migrated_to:
                     await repo.update_chat_telegram_id(deps.pool, chat.id, result.migrated_to)
                 if result.forbidden:
@@ -141,16 +161,18 @@ async def process_chat(
                     errors.append(f"{_chat_label(chat)}: бот выкинут из чата — деактивирован")
                     break
                 if not result.ok:
-                    errors.append(f"{_chat_label(chat)}: не отправлено #{delta.task_id}")
-                    continue  # курсор не двигаем — дельта уедет завтра (§7 п.8-9)
+                    errors.append(f"{_chat_label(chat)}: не отправлен чанк дайджеста")
+                    continue  # курсоры чанка не двигаем — дельта уедет завтра (§7 п.8-9)
                 posted = True
-                if delta.has_changes:
-                    await repo.advance_cursor(deps.pool, delta.task_id, chat.id,
-                                              delta.new_history_id, delta.new_message_id,
-                                              delta.new_comment_id)
-            except Exception as e:  # изоляция цикла отправки (§7 п.9): чат не должен ретраиться каждые 5 мин
-                log.exception("отправка карточки %s/%s", chat.id, delta.task_id)
-                errors.append(f"{_chat_label(chat)}: карточка #{delta.task_id}: {e}")
+                for i in chunk_indices:
+                    delta = blocks[i][0]
+                    if delta.has_changes:
+                        await repo.advance_cursor(deps.pool, delta.task_id, chat.id,
+                                                  delta.new_history_id, delta.new_message_id,
+                                                  delta.new_comment_id)
+            except Exception as e:  # изоляция отправки (§7 п.9): чат не должен ретраиться каждые 5 мин
+                log.exception("отправка чанка дайджеста %s", chat.id)
+                errors.append(f"{_chat_label(chat)}: отправка дайджеста: {e}")
                 continue
 
     if mark_run:

@@ -94,3 +94,29 @@ def clip(text: str, limit: int = 4000) -> str:
         return text
     cut = text.rfind("\n", 0, limit - 1)
     return text[: cut if cut > 0 else limit - 1] + "…"
+
+
+def chunk_blocks(blocks: list[str], limit: int = 4000) -> list[list[int]]:
+    """Дайджест чата одним сообщением (§7 п.7): группирует индексы блоков карточек в
+    минимальное число чанков так, чтобы блок ("\\n\\n".join внутри чанка) никогда не
+    рвался пополам. Возвращает индексы блоков по чанкам — курсорам нужен маппинг
+    чанк -> карточки (§7 п.8: granularity сдвига курсора укрупняется с карточки до чанка).
+
+    Один блок сам по себе длиннее limit получает собственный чанк без дальнейшей резки —
+    это уже подстраховано `clip` на уровне рендера отдельного блока (card_message/
+    no_changes_line), здесь его резать вторично незачем."""
+    chunks: list[list[int]] = []
+    current: list[int] = []
+    current_len = 0
+    for i, block in enumerate(blocks):
+        added_len = len(block) + (2 if current else 0)  # + "\n\n" separator, кроме первого в чанке
+        if current and current_len + added_len > limit:
+            chunks.append(current)
+            current = []
+            current_len = 0
+            added_len = len(block)
+        current.append(i)
+        current_len += added_len
+    if current:
+        chunks.append(current)
+    return chunks

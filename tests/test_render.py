@@ -238,6 +238,40 @@ def test_card_message_duplicate_file_names_get_one_anchor_each_no_nesting():
     assert "📎" not in msg  # оба вхождения инлайн — footer пуст
 
 
+# --- chunk_blocks: дайджест чата одним сообщением, сплит по границам блоков (§7 п.7-8) ---
+
+
+def test_chunk_blocks_all_fit_in_one_chunk():
+    """Суммарная длина укладывается в лимит -> ровно один чанк со всеми блоками."""
+    blocks = ["карточка раз", "карточка два", "карточка три"]
+    chunks = render.chunk_blocks(blocks, limit=4000)
+    assert chunks == [[0, 1, 2]]
+
+
+def test_chunk_blocks_splits_on_block_boundaries_when_over_limit():
+    """Переполнение -> минимальное число чанков, блок не рвётся: два блока по 60 при
+    limit=100 (с разделителем "\\n\\n" = 2 символа не влезают вдвоём: 60+2+60=122 > 100)
+    расходятся по разным чанкам, третий блок уходит в чанк второго (60+2+30=92 <= 100)."""
+    blocks = ["a" * 60, "b" * 60, "c" * 30]
+    chunks = render.chunk_blocks(blocks, limit=100)
+    assert chunks == [[0], [1, 2]]
+    # проверяем инвариант: ни один чанк не превышает лимит при склейке "\n\n".join
+    for chunk in chunks:
+        assert len("\n\n".join(blocks[i] for i in chunk)) <= 100
+
+
+def test_chunk_blocks_giant_single_block_gets_own_chunk():
+    """Один блок сам по себе длиннее лимита (страховка — clip на уровне рендера блока,
+    здесь дальше не режем) -> получает собственный чанк, соседи не пострадали."""
+    blocks = ["normal", "x" * 5000, "also normal"]
+    chunks = render.chunk_blocks(blocks, limit=4000)
+    assert chunks == [[0], [1], [2]]
+
+
+def test_chunk_blocks_empty_list_returns_empty():
+    assert render.chunk_blocks([], limit=4000) == []
+
+
 def test_card_message_substring_file_names_link_independently():
     """Регрессия: "план.pdf" — подстрока "план.pdf.bak". Последовательный .replace() по
     короткому имени порвал бы длинное пополам. Сортировка альтернации по убыванию длины

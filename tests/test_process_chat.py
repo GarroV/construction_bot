@@ -262,7 +262,9 @@ async def test_bad_prompt_placeholder_falls_back_to_render(monkeypatch):
     repo_mocks.mark_posted.assert_awaited_once_with(deps.pool, chat.id)
 
 
-async def test_mixed_chat_renders_no_changes_line(monkeypatch):
+async def test_mixed_chat_single_send_contains_both_blocks(monkeypatch):
+    """(д) Смешанный чат (изменения + no_changes) -> ОДНО сообщение чата, оба блока
+    склеены пустой строкой внутри него (§7 п.7)."""
     chat = make_chat()
     repo_mocks = patch_repo(monkeypatch, cards=[CARD, CARD2])
 
@@ -276,12 +278,100 @@ async def test_mixed_chat_renders_no_changes_line(monkeypatch):
 
     await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
 
-    assert send_fn.await_count == 2
-    first_text = send_fn.await_args_list[0].args[3]
-    second_text = send_fn.await_args_list[1].args[3]
-    assert "ок" in first_text
-    assert "изменений нет" in second_text
+    assert send_fn.await_count == 1  # одно сообщение на чат, не на карточку
+    text = send_fn.await_args.args[3]
+    assert "ок" in text
+    assert "изменений нет" in text
+    # курсор двигается только у карточки с изменениями — у no-changes курсор не трогаем (как раньше)
+    repo_mocks.advance_cursor.assert_awaited_once_with(deps.pool, 8017, chat.id, 31, 202, 0)
     repo_mocks.mark_posted.assert_awaited_once_with(deps.pool, chat.id)
+
+
+# --- Дайджест чата одним сообщением — сплит по границам блоков только при переполнении ---
+# (владелец, §7 п.7-8): granularity сдвига курсора укрупнена с карточки до чанка.
+
+
+DELTA2_WITH_CHANGES = CardDelta(
+    task_id=8018, alias="Бишкек 9", task_changes=["статус: 1 → 2"], comments=[],
+    checklist_done=1, checklist_total=5, files=[], new_history_id=15, new_message_id=60,
+)
+
+
+def _patch_two_cards_with_changes(monkeypatch):
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD, CARD2])
+
+    async def fake_collect(bx, card, cursor):
+        return DELTA_WITH_CHANGES if card.bitrix_task_id == 8017 else DELTA2_WITH_CHANGES
+
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", fake_collect)
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    return repo_mocks
+
+
+async def test_a_two_cards_with_changes_single_send_both_cursors_advance(monkeypatch):
+    """(а) Две карточки с изменениями -> ОДИН send, оба advance_cursor после ok."""
+    chat = make_chat()
+    repo_mocks = _patch_two_cards_with_changes(monkeypatch)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert send_fn.await_count == 1
+    text = send_fn.await_args.args[3]
+    assert "Бишкек 8" in text and "Бишкек 9" in text
+    assert repo_mocks.advance_cursor.await_count == 2
+    repo_mocks.advance_cursor.assert_any_call(deps.pool, 8017, chat.id, 31, 202, 0)
+    repo_mocks.advance_cursor.assert_any_call(deps.pool, 8018, chat.id, 15, 60, 0)
+    repo_mocks.mark_posted.assert_awaited_once_with(deps.pool, chat.id)
+
+
+async def test_b_send_not_ok_no_cursor_advances(monkeypatch):
+    """(б) send не ok -> ни один курсор не сдвинут."""
+    chat = make_chat()
+    repo_mocks = _patch_two_cards_with_changes(monkeypatch)
+    send_fn = AsyncMock(return_value=SendResult(ok=False))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert send_fn.await_count == 1
+    repo_mocks.advance_cursor.assert_not_awaited()
+    repo_mocks.mark_posted.assert_not_awaited()
+    assert posted is False
+    assert errors
+
+
+async def test_c_two_chunks_first_ok_second_not_only_first_cursor_advances(monkeypatch):
+    """(в) Два чанка, первый ok второй нет -> курсоры только первого."""
+    chat = make_chat()
+    repo_mocks = _patch_two_cards_with_changes(monkeypatch)
+    monkeypatch.setattr(scheduler.render, "chunk_blocks", lambda texts, limit=4000: [[0], [1]])
+    send_fn = AsyncMock(side_effect=[SendResult(ok=True), SendResult(ok=False)])
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert send_fn.await_count == 2
+    repo_mocks.advance_cursor.assert_awaited_once_with(deps.pool, 8017, chat.id, 31, 202, 0)
+    assert posted is True  # ≥1 успешный чанк (§7 п.9)
+    assert errors  # второй чанк не отправлен — попал в сводку
+
+
+async def test_d_forbidden_on_first_chunk_stops_remaining_chunks(monkeypatch):
+    """(г) forbidden на первом чанке -> второй не отправлен."""
+    chat = make_chat()
+    repo_mocks = _patch_two_cards_with_changes(monkeypatch)
+    monkeypatch.setattr(scheduler.render, "chunk_blocks", lambda texts, limit=4000: [[0], [1]])
+    send_fn = AsyncMock(return_value=SendResult(ok=False, forbidden=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert send_fn.await_count == 1  # второй чанк не отправлен
+    repo_mocks.deactivate_chat.assert_awaited_once_with(deps.pool, chat.id)
+    repo_mocks.advance_cursor.assert_not_awaited()
+    assert posted is False
 
 
 async def test_tick_isolates_chat_errors_and_reports_admin(monkeypatch):
