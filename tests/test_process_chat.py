@@ -340,6 +340,8 @@ async def test_b_send_not_ok_no_cursor_advances(monkeypatch):
     repo_mocks.mark_posted.assert_not_awaited()
     assert posted is False
     assert errors
+    # (ревью, п.5) детализация: перечислены task_id ОБЕИХ карточек чанка, не только первой
+    assert any("8017" in e and "8018" in e for e in errors)
 
 
 async def test_c_two_chunks_first_ok_second_not_only_first_cursor_advances(monkeypatch):
@@ -372,6 +374,61 @@ async def test_d_forbidden_on_first_chunk_stops_remaining_chunks(monkeypatch):
     repo_mocks.deactivate_chat.assert_awaited_once_with(deps.pool, chat.id)
     repo_mocks.advance_cursor.assert_not_awaited()
     assert posted is False
+
+
+async def test_render_failure_for_one_card_is_isolated_in_multi_card_chat(monkeypatch):
+    """(ревью) Рендер одной карточки падает в многокарточном чате: её блока нет в
+    отправленном сообщении, курсор для неё не двигается; остальные карточки едут в том же
+    (единственном) сообщении и их курсоры сдвигаются как обычно, ошибка попадает в errors."""
+    chat = make_chat()
+    repo_mocks = _patch_two_cards_with_changes(monkeypatch)
+
+    real_card_message = scheduler.render.card_message
+
+    def flaky_card_message(delta, summary, url, locales, lang):
+        if delta.task_id == 8017:
+            raise RuntimeError("boom render")
+        return real_card_message(delta, summary, url, locales, lang)
+
+    monkeypatch.setattr(scheduler.render, "card_message", flaky_card_message)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert send_fn.await_count == 1
+    text = send_fn.await_args.args[3]
+    assert "Бишкек 9" in text
+    assert "Бишкек 8" not in text  # блок упавшей карточки отсутствует в отправленном тексте
+    repo_mocks.advance_cursor.assert_awaited_once_with(deps.pool, 8018, chat.id, 15, 60, 0)
+    assert posted is True
+    assert any("8017" in e for e in errors)
+
+
+async def test_advance_cursor_failure_for_one_card_does_not_block_others_in_chunk(monkeypatch):
+    """(ревью, п.1) Сбой записи курсора одной карточки чанка не должен глушить запись
+    курсоров остальных карточек уже доставленного сообщения — иначе их дельта уехала бы
+    завтра повторно (дубль в дайджесте), хотя отправка была успешной."""
+    chat = make_chat()
+    _patch_two_cards_with_changes(monkeypatch)
+
+    async def flaky_advance_cursor(pool, task_id, chat_id, *args):
+        if task_id == 8017:
+            raise RuntimeError("db boom")
+        return None
+
+    advance_cursor_mock = AsyncMock(side_effect=flaky_advance_cursor)
+    monkeypatch.setattr(scheduler.repo, "advance_cursor", advance_cursor_mock)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert send_fn.await_count == 1
+    assert advance_cursor_mock.await_count == 2  # обе попытки предприняты, несмотря на сбой первой
+    advance_cursor_mock.assert_any_call(deps.pool, 8018, chat.id, 15, 60, 0)
+    assert posted is True
+    assert any("8017" in e and "курсор" in e for e in errors)
 
 
 async def test_tick_isolates_chat_errors_and_reports_admin(monkeypatch):

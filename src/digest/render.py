@@ -4,6 +4,8 @@ import re
 from src.digest.llm import CardDelta
 from src.i18n import t
 
+MESSAGE_LIMIT = 4000  # §14: запас под 4096 (after entities parsing) — общий лимит clip/chunk_blocks
+
 
 def _checklist_line(delta: CardDelta, locales, lang: str) -> str:
     """Системная строка (не LLM) — этап чек-листа сейчас. Идёт и в LLM-режиме, и в
@@ -88,7 +90,7 @@ def no_changes_line(alias: str, task_url: str, locales, lang: str) -> str:
             f"{t(locales, lang, 'no_changes')}")
 
 
-def clip(text: str, limit: int = 4000) -> str:
+def clip(text: str, limit: int = MESSAGE_LIMIT) -> str:
     """Страховка от 4096 (§14): срез по границе строки, не разрывая теги."""
     if len(text) <= limit:
         return text
@@ -96,7 +98,7 @@ def clip(text: str, limit: int = 4000) -> str:
     return text[: cut if cut > 0 else limit - 1] + "…"
 
 
-def chunk_blocks(blocks: list[str], limit: int = 4000) -> list[list[int]]:
+def chunk_blocks(blocks: list[str], limit: int = MESSAGE_LIMIT) -> list[list[int]]:
     """Дайджест чата одним сообщением (§7 п.7): группирует индексы блоков карточек в
     минимальное число чанков так, чтобы блок ("\\n\\n".join внутри чанка) никогда не
     рвался пополам. Возвращает индексы блоков по чанкам — курсорам нужен маппинг

@@ -161,15 +161,26 @@ async def process_chat(
                     errors.append(f"{_chat_label(chat)}: бот выкинут из чата — деактивирован")
                     break
                 if not result.ok:
-                    errors.append(f"{_chat_label(chat)}: не отправлен чанк дайджеста")
+                    task_ids = ", ".join(f"#{blocks[i][0].task_id}" for i in chunk_indices)
+                    errors.append(f"{_chat_label(chat)}: не отправлен чанк дайджеста ({task_ids})")
                     continue  # курсоры чанка не двигаем — дельта уедет завтра (§7 п.8-9)
                 posted = True
                 for i in chunk_indices:
                     delta = blocks[i][0]
-                    if delta.has_changes:
+                    if not delta.has_changes:
+                        continue
+                    try:
+                        # Свой try/except на карточку (ревью-фикс): без него сбой записи
+                        # курсора первой карточки чанка глушил бы запись курсоров остальных
+                        # карточек УЖЕ доставленного сообщения — их дельта уехала бы завтра
+                        # повторно (дубль в дайджесте), хотя отправка была успешной.
                         await repo.advance_cursor(deps.pool, delta.task_id, chat.id,
                                                   delta.new_history_id, delta.new_message_id,
                                                   delta.new_comment_id)
+                    except Exception as e:
+                        log.exception("запись курсора %s/%s", chat.id, delta.task_id)
+                        errors.append(f"{_chat_label(chat)}: курсор #{delta.task_id} не записан: {e}")
+                        continue
             except Exception as e:  # изоляция отправки (§7 п.9): чат не должен ретраиться каждые 5 мин
                 log.exception("отправка чанка дайджеста %s", chat.id)
                 errors.append(f"{_chat_label(chat)}: отправка дайджеста: {e}")

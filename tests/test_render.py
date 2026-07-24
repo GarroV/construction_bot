@@ -272,6 +272,15 @@ def test_chunk_blocks_empty_list_returns_empty():
     assert render.chunk_blocks([], limit=4000) == []
 
 
+def test_clip_and_chunk_blocks_share_message_limit_constant():
+    """(ревью, п.4) Общий лимит вынесен в константу — clip и chunk_blocks используют
+    один и тот же дефолт, а не два независимо захардкоженных числа 4000."""
+    assert render.MESSAGE_LIMIT == 4000
+    text = "x" * (render.MESSAGE_LIMIT + 1)
+    assert len(render.clip(text)) == render.MESSAGE_LIMIT  # без явного limit — берёт константу
+    assert render.chunk_blocks(["a" * render.MESSAGE_LIMIT, "b"]) == [[0], [1]]
+
+
 def test_card_message_substring_file_names_link_independently():
     """Регрессия: "план.pdf" — подстрока "план.pdf.bak". Последовательный .replace() по
     короткому имени порвал бы длинное пополам. Сортировка альтернации по убыванию длины
