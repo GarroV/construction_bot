@@ -5,5 +5,6 @@ COPY src/ src/
 COPY prompts/ prompts/
 COPY locales/ locales/
 COPY migrations/ migrations/
+COPY scripts/ scripts/
 RUN pip install --no-cache-dir .
 CMD ["python", "-m", "src.main"]
