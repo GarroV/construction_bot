@@ -19,6 +19,8 @@ _VALID_ZONES = available_timezones()
 # lower-case алиас (ru/en, город или страна) -> канонический IANA-идентификатор.
 # Покрыты страны сети Dodo International и их столицы/крупные города.
 TZ_ALIASES: dict[str, str] = {
+    "utc": "UTC",
+    "gmt": "UTC",
     # Сербия / Белград
     "сербия": "Europe/Belgrade",
     "белград": "Europe/Belgrade",

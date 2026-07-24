@@ -105,3 +105,8 @@ def test_resolve_tz_covers_dodo_international_network_countries():
     for alias, iana in expected.items():
         assert resolve_tz(alias) == iana, f"{alias!r} -> {iana!r}"
         assert TZ_ALIASES[alias] == iana
+
+
+def test_lowercase_utc_resolves():
+    assert resolve_tz("utc") == "UTC"
+    assert resolve_tz("gmt") == "UTC"
