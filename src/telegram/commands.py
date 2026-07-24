@@ -16,13 +16,44 @@ from src.telegram.capture import chat_title_of, thread_id_of
 log = logging.getLogger(__name__)
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _LANG_RE = re.compile(r"^[a-z]{2}(-[a-z]{2})?$", re.IGNORECASE)
+# карточек в Битрикс24 миллион — поиск по названию не годится (владелец зафиксировал
+# дизайн). Партнёр либо шлёт голый ID, либо копирует ссылку из браузера вида
+# .../company/personal/user/1650/tasks/task/view/42103/ (бывает и .../workgroups/
+# group/25/tasks/task/view/42103/) — извлекаем ID регэкспом, префикс пути не важен.
+_TASK_URL_RE = re.compile(r"/tasks/task/view/(\d+)")
+
+
+def _parse_task_ref(text: str) -> int | None:
+    """Голое число ИЛИ ссылка на карточку -> ID; иначе None (мусор). \\d+ в регэкспе
+    сам останавливается на первом не-цифровом символе — хвост вида ?commentId=1#com1
+    или закрывающий /  не мешают. Ссылка может быть где угодно внутри фразы —
+    ищем по всему тексту, а не только по началу."""
+    stripped = text.strip()
+    if stripped.isdigit():
+        return int(stripped)
+    m = _TASK_URL_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
+_EMPTY_ARGS_FLOWS = {"add": "add", "time": "time", "lang": "lang", "remove": "remove"}
+
+
+def resolve_empty_args_flow(cmd: str, args: str) -> str | None:
+    """Владелец зафиксировал: голая команда (без аргументов) — это диалог, а не
+    «Использование: …» (та подсказка — только на непустые НЕвалидные аргументы,
+    например /time 9:99 или /add фигня). Возвращает имя диалогового флоу из menu.py
+    для add/time/lang/remove, если аргументы пустые/из пробелов; иначе None — ядро
+    команды вызывается как обычно (list/start/help диалога не имеют вовсе)."""
+    if args.strip():
+        return None
+    return _EMPTY_ARGS_FLOWS.get(cmd)
 
 
 async def handle_add(deps, chat, args: str, user_id: int) -> str:
     lang = chat.digest_language
-    if not args.strip().isdigit():
+    task_id = _parse_task_ref(args)
+    if task_id is None:
         return t(deps.locales, lang, "add_usage")
-    task_id = int(args.strip())
     try:
         task = await methods.get_task(deps.bx, task_id)
     except BitrixError:
@@ -177,7 +208,7 @@ def build_router(deps) -> Router:
 
     def register(cmd: str, core, *, attach_menu: bool = False):
         @router.message(Command(cmd))
-        async def _handler(message: Message, _core=core, _attach_menu=attach_menu):
+        async def _handler(message: Message, _core=core, _attach_menu=attach_menu, _cmd=cmd):
             if not _addressed_to_me(message, getattr(deps, "bot_username", "")):
                 return  # голая команда в группе — молчим (адресность при нескольких ботах)
             chat = await ensure_chat(deps, message)
@@ -186,13 +217,30 @@ def build_router(deps) -> Router:
                     t(deps.locales, deps.settings.default_language, "restricted_denied")
                 )
                 return
+            args = _args_of(message)
+            flow = resolve_empty_args_flow(_cmd, args)
+            if flow is not None:
+                # локальный импорт (не на уровне модуля): menu.py импортирует ядра
+                # отсюда же на уровне модуля — импорт на уровне модуля дал бы цикл.
+                from src.telegram.menu import (
+                    send_add_prompt,
+                    send_lang_keyboard,
+                    send_rm_keyboard,
+                    send_time_prompt,
+                )
+                flow_fn = {
+                    "add": send_add_prompt, "time": send_time_prompt,
+                    "lang": send_lang_keyboard, "remove": send_rm_keyboard,
+                }[flow]
+                await flow_fn(deps, message, chat)
+                return
             if _core is handle_add:
-                text = await _core(deps, chat, _args_of(message),
+                text = await _core(deps, chat, args,
                                    message.from_user.id if message.from_user else 0)
             elif _core in (handle_list, handle_start):
                 text = await _core(deps, chat)
             else:
-                text = await _core(deps, chat, _args_of(message))
+                text = await _core(deps, chat, args)
             if _attach_menu:
                 # локальный импорт (не на уровне модуля): menu.py импортирует ядра
                 # отсюда же на уровне модуля — импорт на уровне модуля дал бы цикл.

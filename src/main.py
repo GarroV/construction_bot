@@ -46,7 +46,7 @@ async def main() -> None:
         # Меню команд: дискаверабилити + при нескольких ботах в чате клиент
         # подставляет @username из меню автоматически (адресация без коллизий)
         await deps.bot.set_my_commands([
-            BotCommand(command="add", description="Подключить карточку: /add 42103"),
+            BotCommand(command="add", description="Подключить карточку: номер или ссылка"),
             BotCommand(command="list", description="Что отслеживается в этом топике"),
             BotCommand(command="remove", description="Снять карточку: /remove 42103"),
             BotCommand(command="time", description="Время дайджеста: /time 09:00 Europe/Belgrade"),

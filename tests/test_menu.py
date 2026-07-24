@@ -311,6 +311,63 @@ async def test_dispatch_callback_lang_unknown_code_ignored(monkeypatch):
     callback.message.answer.assert_not_awaited()
 
 
+# --- send_*-функции: общий код диалоговых флоу для голых команд И кнопок панели ---
+
+async def test_send_add_prompt_sends_prompt_text():
+    deps = make_deps()
+    target = _msg(reply_text=None)
+
+    await menu.send_add_prompt(deps, target, CHAT)
+
+    target.answer.assert_awaited_once_with(t(LOCALES, "ru", "menu_add_prompt"))
+
+
+async def test_send_time_prompt_sends_prompt_text():
+    deps = make_deps()
+    target = _msg(reply_text=None)
+
+    await menu.send_time_prompt(deps, target, CHAT)
+
+    target.answer.assert_awaited_once_with(t(LOCALES, "ru", "menu_time_prompt"))
+
+
+async def test_send_lang_keyboard_sends_language_picker():
+    deps = make_deps()
+    target = _msg(reply_text=None)
+
+    await menu.send_lang_keyboard(deps, target, CHAT)
+
+    target.answer.assert_awaited_once()
+    args, kwargs = target.answer.await_args
+    assert args[0] == t(LOCALES, "ru", "menu_lang_pick")
+    kb = kwargs["reply_markup"]
+    data = {btn.callback_data for row in kb.inline_keyboard for btn in row}
+    assert "m:lang:ru" in data and "m:lang:en" in data
+
+
+async def test_send_rm_keyboard_builds_keyboard_from_active_cards(monkeypatch):
+    deps = make_deps()
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=CARDS))
+    target = _msg(reply_text=None)
+
+    await menu.send_rm_keyboard(deps, target, CHAT)
+
+    kwargs = target.answer.await_args.kwargs
+    kb = kwargs["reply_markup"]
+    data = {btn.callback_data for row in kb.inline_keyboard for btn in row}
+    assert data == {"m:rm:8017", "m:rm:8018", "m:cancel"}
+
+
+async def test_send_rm_keyboard_empty_sends_empty_text(monkeypatch):
+    deps = make_deps()
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=[]))
+    target = _msg(reply_text=None)
+
+    await menu.send_rm_keyboard(deps, target, CHAT)
+
+    target.answer.assert_awaited_once_with(t(LOCALES, "ru", "menu_rm_empty"))
+
+
 # --- Ограниченный чат: callback.answer(show_alert=True) вместо ответа ---
 
 async def test_dispatch_callback_restricted_denies_with_alert(monkeypatch):

@@ -82,12 +82,33 @@ async def test_add_degrades_to_zero_comment_cursor_when_comment_api_errors(monke
 
 async def test_add_rejects_bad_args_and_missing_task(monkeypatch):
     deps = make_deps()
-    assert "Использование" in await commands.handle_add(deps, CHAT, "", user_id=1)
-    assert "Использование" in await commands.handle_add(deps, CHAT, "abc", user_id=1)
+    # add_usage теперь без слова "Использование" — владелец зафиксировал новый текст
+    # («Пришли номер карточки или ссылку на неё из Битрикса»), проверяем по сути.
+    assert "номер" in await commands.handle_add(deps, CHAT, "", user_id=1)
+    assert "номер" in await commands.handle_add(deps, CHAT, "фигня", user_id=1)
 
     monkeypatch.setattr(commands.methods, "get_task",
                         AsyncMock(side_effect=BitrixError("TASK_NOT_FOUND")))
     assert "не найдена" in await commands.handle_add(deps, CHAT, "999", user_id=1)
+
+
+async def test_add_with_full_task_url_extracts_id(monkeypatch):
+    """Владелец зафиксировал: /add принимает ID ИЛИ ссылку на карточку — партнёр
+    копирует URL из браузера."""
+    deps = make_deps()
+    monkeypatch.setattr(commands.methods, "get_task",
+                        AsyncMock(return_value={"title": "Бишкек 8", "chatId": 42}))
+    monkeypatch.setattr(commands.methods, "get_latest_history_id", AsyncMock(return_value=100))
+    monkeypatch.setattr(commands.methods, "get_latest_chat_message_id", AsyncMock(return_value=200))
+    monkeypatch.setattr(commands.methods, "get_latest_comment_id", AsyncMock(return_value=0))
+    add_card = AsyncMock(return_value="added")
+    monkeypatch.setattr(commands.repo, "add_card", add_card)
+
+    url = "https://b24.dodoteam.ru/company/personal/user/1650/tasks/task/view/42103/"
+    reply = await commands.handle_add(deps, CHAT, url, user_id=555)
+
+    assert "Бишкек 8" in reply and "42103" in reply
+    add_card.assert_awaited_once_with(deps.pool, 1, 42103, "Бишкек 8", 555, 100, 200, 0)
 
 
 async def test_remove_and_list(monkeypatch):
@@ -239,3 +260,63 @@ def test_addressed_to_me_rules():
     assert commands._addressed_to_me(group_other, "dodo_construction_bot") is False
     assert commands._addressed_to_me(private, "dodo_construction_bot") is True
     assert commands._addressed_to_me(group, "") is True  # username неизвестен -> не молчим
+
+
+# --- _parse_task_ref: голое число ИЛИ ссылка на карточку из Битрикса -> ID ---
+
+def test_parse_task_ref_plain_digits():
+    assert commands._parse_task_ref("8017") == 8017
+    assert commands._parse_task_ref("  8017  ") == 8017
+
+
+def test_parse_task_ref_full_card_url():
+    url = "https://b24.dodoteam.ru/company/personal/user/1650/tasks/task/view/42103/"
+    assert commands._parse_task_ref(url) == 42103
+
+
+def test_parse_task_ref_workgroups_card_url():
+    url = "https://b24.dodoteam.ru/workgroups/group/25/tasks/task/view/42103/"
+    assert commands._parse_task_ref(url) == 42103
+
+
+def test_parse_task_ref_url_with_query_and_fragment_tail():
+    url = "https://b24.dodoteam.ru/company/personal/user/1650/tasks/task/view/42103/?commentId=1#com1"
+    assert commands._parse_task_ref(url) == 42103
+
+
+def test_parse_task_ref_link_inside_surrounding_phrase():
+    text = ("гляньте плз "
+            "https://b24.dodoteam.ru/company/personal/user/1650/tasks/task/view/42103/ спасибо")
+    assert commands._parse_task_ref(text) == 42103
+
+
+def test_parse_task_ref_garbage_returns_none():
+    assert commands._parse_task_ref("фигня") is None
+    assert commands._parse_task_ref("") is None
+    assert commands._parse_task_ref("   ") is None
+    assert commands._parse_task_ref("https://b24.dodoteam.ru/tasks/list/") is None  # без /view/<id>
+
+
+# --- resolve_empty_args_flow: пустые аргументы -> имя диалогового флоу (не usage) ---
+
+def test_resolve_empty_args_flow_maps_dialog_commands_when_args_blank():
+    assert commands.resolve_empty_args_flow("add", "") == "add"
+    assert commands.resolve_empty_args_flow("time", "") == "time"
+    assert commands.resolve_empty_args_flow("lang", "") == "lang"
+    assert commands.resolve_empty_args_flow("remove", "") == "remove"
+    assert commands.resolve_empty_args_flow("add", "   ") == "add"  # только пробелы — тоже пусто
+
+
+def test_resolve_empty_args_flow_none_when_args_present_even_if_invalid():
+    """Непустые (в т.ч. невалидные) аргументы -> None, ядро вызывается как обычно и
+    само решает — usage-подсказка (/time 9:99, /add фигня) или успех."""
+    assert commands.resolve_empty_args_flow("add", "8017") is None
+    assert commands.resolve_empty_args_flow("add", "фигня") is None
+    assert commands.resolve_empty_args_flow("time", "9:99") is None
+    assert commands.resolve_empty_args_flow("lang", "russian!") is None
+
+
+def test_resolve_empty_args_flow_none_for_commands_without_dialog():
+    assert commands.resolve_empty_args_flow("list", "") is None
+    assert commands.resolve_empty_args_flow("start", "") is None
+    assert commands.resolve_empty_args_flow("help", "") is None

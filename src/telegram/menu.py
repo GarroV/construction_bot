@@ -19,10 +19,18 @@ Callback-путь и права (после ревью, Critical): callback.mess
 ensure_chat_for_callback (commands.py) — она читает user_id из callback.from_user, а не
 из callback.message.from_user.
 
+Диалоговые флоу вместо usage-подсказок: владелец зафиксировал — голая команда без
+аргументов (/add, /time, /lang, /remove) должна открывать диалог, а не показывать
+«Использование: …» (та подсказка — только на непустые НЕвалидные аргументы).
+send_add_prompt/send_time_prompt/send_lang_keyboard/send_rm_keyboard — общий код
+для этого диалога: их вызывает и dispatch_callback (кнопки панели), и
+commands.build_router (голая команда) — один текст, одна реализация (DRY).
+
 Циклический импорт: menu.py импортирует точечно только «ядра» из commands.py
 (ensure_chat, ensure_chat_for_callback, _addressed_to_me, handle_add, handle_time,
 _args_of) — их значения не нужны build_router. commands.py, наоборот, использует
-build_panel_keyboard() отсюда только внутри build_router() (локальный импорт по месту
+build_panel_keyboard()/send_add_prompt/send_time_prompt/send_lang_keyboard/
+send_rm_keyboard отсюда только внутри build_router() (локальный импорт по месту
 вызова, а не на уровне модуля) — к моменту вызова оба модуля уже полностью загружены,
 цикла не возникает.
 """
@@ -90,6 +98,40 @@ def build_lang_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=code.upper(), callback_data=f"m:lang:{code}") for code in _LANG_CODES]
     ])
+
+
+# Диалоговые флоу для add/time/lang/remove (владелец зафиксировал: голая команда без
+# аргументов — это диалог, не «Использование: …», см. commands.resolve_empty_args_flow).
+# Общие функции — их вызывают И callback-хендлеры кнопок панели (dispatch_callback),
+# И голые команды без аргументов (commands.build_router) — один код, один текст (DRY).
+# target — Message, на которое зовём .answer() (либо сообщение пользователя с командой,
+# либо callback.message — сообщение бота с кнопкой; у обоих есть .answer()).
+
+async def send_add_prompt(deps, target: Message, chat: ChatRow) -> None:
+    await target.answer(t(deps.locales, chat.digest_language, "menu_add_prompt"))
+
+
+async def send_time_prompt(deps, target: Message, chat: ChatRow) -> None:
+    await target.answer(t(deps.locales, chat.digest_language, "menu_time_prompt"))
+
+
+async def send_lang_keyboard(deps, target: Message, chat: ChatRow) -> None:
+    await target.answer(
+        t(deps.locales, chat.digest_language, "menu_lang_pick"),
+        reply_markup=build_lang_keyboard(),
+    )
+
+
+async def send_rm_keyboard(deps, target: Message, chat: ChatRow) -> None:
+    lang = chat.digest_language
+    cards = await repo.list_active_cards(deps.pool, chat.id)
+    if not cards:
+        await target.answer(t(deps.locales, lang, "menu_rm_empty"))
+        return
+    await target.answer(
+        t(deps.locales, lang, "menu_rm_pick"),
+        reply_markup=build_rm_keyboard(deps.locales, lang, cards),
+    )
 
 
 async def run_report(deps, chat: ChatRow) -> None:
@@ -163,13 +205,13 @@ async def dispatch_callback(deps, callback: CallbackQuery) -> None:
 
     if data == "m:add":
         await callback.answer()
-        await message.answer(t(deps.locales, lang, "menu_add_prompt"))
+        await send_add_prompt(deps, message, chat)
     elif data == "m:time":
         await callback.answer()
-        await message.answer(t(deps.locales, lang, "menu_time_prompt"))
+        await send_time_prompt(deps, message, chat)
     elif data == "m:lang":
         await callback.answer()
-        await message.answer(t(deps.locales, lang, "menu_lang_pick"), reply_markup=build_lang_keyboard())
+        await send_lang_keyboard(deps, message, chat)
     elif data.startswith("m:lang:"):
         await callback.answer()
         code = data.split(":", 2)[2]
@@ -179,14 +221,7 @@ async def dispatch_callback(deps, callback: CallbackQuery) -> None:
         await message.answer(t(deps.locales, code, "lang_ok", code=code))
     elif data == "m:rm":
         await callback.answer()
-        cards = await repo.list_active_cards(deps.pool, chat.id)
-        if not cards:
-            await message.answer(t(deps.locales, lang, "menu_rm_empty"))
-        else:
-            await message.answer(
-                t(deps.locales, lang, "menu_rm_pick"),
-                reply_markup=build_rm_keyboard(deps.locales, lang, cards),
-            )
+        await send_rm_keyboard(deps, message, chat)
     elif data.startswith("m:rm:"):
         await callback.answer()
         try:
