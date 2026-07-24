@@ -16,6 +16,8 @@ PROMPT = llm.load_prompt()
 
 CARD = CardRow(id=1, bitrix_task_id=8017, chat_id=1, alias="Бишкек 8", active=True)
 CARD2 = CardRow(id=2, bitrix_task_id=8018, chat_id=1, alias="Бишкек 9", active=True)
+AUTO_CHILD = CardRow(id=3, bitrix_task_id=73689, chat_id=1, alias="Бишкек 8 / Подзадача",
+                     active=True, auto_from=8017)
 CUR = CursorRow(bitrix_task_id=8017, chat_id=1, last_history_id=20, last_message_id=200, last_comment_id=0)
 DELTA_WITH_CHANGES = CardDelta(
     task_id=8017, alias="Бишкек 8", task_changes=["статус: 2 → 5"], comments=[],
@@ -28,6 +30,10 @@ DELTA_EMPTY = CardDelta(
 DELTA_EMPTY_2 = CardDelta(
     task_id=8018, alias="Бишкек 9", task_changes=[], comments=[],
     checklist_done=0, checklist_total=0, files=[], new_history_id=5, new_message_id=50,
+)
+DELTA_AUTO_CHILD_WITH_CHANGES = CardDelta(
+    task_id=73689, alias="Бишкек 8 / Подзадача", task_changes=["статус: 1 → 2"], comments=[],
+    checklist_done=0, checklist_total=0, files=[], new_history_id=5, new_message_id=9,
 )
 
 
@@ -642,6 +648,74 @@ async def test_only_task_id_none_keeps_previous_behavior(monkeypatch):
 
     scheduler.methods.list_subtasks.assert_awaited_once()
     repo_mocks.mark_digest_run.assert_awaited_once()
+
+
+async def test_only_task_id_parent_includes_its_auto_discovered_children(monkeypatch):
+    """Владелец (фидбек по скриншоту): подзадача подразумевается родителем — только
+    родитель = только сама подзадача больше не выбор пользователя, но раз родитель выбран,
+    его авто-подхваченные дети едут вместе (`c.auto_from == only_task_id`); сосед (другая
+    ручная карточка) в отчёт не попадает. Курсоры обоих — родителя и ребёнка — двигаются."""
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD, CARD2, AUTO_CHILD])
+    list_subtasks_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(scheduler.methods, "list_subtasks", list_subtasks_mock)
+
+    async def fake_collect(bx, card, cursor):
+        if card.bitrix_task_id == 8017:
+            return DELTA_WITH_CHANGES
+        if card.bitrix_task_id == 73689:
+            return DELTA_AUTO_CHILD_WITH_CHANGES
+        return DELTA_EMPTY_2  # CARD2 — сосед, не должен быть даже собран
+
+    collect_mock = AsyncMock(side_effect=fake_collect)
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", collect_mock)
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(
+        deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC), mark_run=False, only_task_id=8017,
+    )
+
+    assert not errors
+    assert posted is True
+    assert send_fn.await_count == 1
+    text = send_fn.await_args.args[3]
+    assert "Бишкек 8" in text        # родитель
+    assert "Подзадача" in text       # авто-ребёнок
+    assert "Бишкек 9" not in text    # сосед не подтянулся
+    list_subtasks_mock.assert_not_awaited()  # дискавери всё равно пропущен целиком
+    collected_ids = {c.args[1].bitrix_task_id for c in collect_mock.await_args_list}
+    assert collected_ids == {8017, 73689}  # CARD2 вообще не собирался
+    repo_mocks.advance_cursor.assert_any_call(deps.pool, 8017, chat.id, 31, 202, 0)
+    repo_mocks.advance_cursor.assert_any_call(deps.pool, 73689, chat.id, 5, 9, 0)
+    assert repo_mocks.advance_cursor.await_count == 2
+
+
+async def test_only_task_id_direct_auto_child_does_not_pull_in_parent_or_siblings(monkeypatch):
+    """Прямая адресация ссылкой/id на авто-ребёнка (/report <ссылка на подзадачу>) —
+    по-прежнему точечно: только сам ребёнок, ни родитель, ни братья не подтягиваются
+    (фильтр симметричен: `auto_from` ребёнка не совпадает с его же `only_task_id`)."""
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD, CARD2, AUTO_CHILD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_AUTO_CHILD_WITH_CHANGES))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(
+        deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC), mark_run=False, only_task_id=73689,
+    )
+
+    assert not errors
+    assert posted is True
+    assert send_fn.await_count == 1
+    text = send_fn.await_args.args[3]
+    assert "view/73689/" in text      # авто-ребёнок
+    assert "view/8017/" not in text   # родитель не подтянулся
+    assert "Бишкек 9" not in text     # сосед тем более
+    repo_mocks.advance_cursor.assert_awaited_once_with(deps.pool, 73689, chat.id, 5, 9, 0)
 
 
 async def test_discovery_calls_list_subtasks_only_for_manual_cards(monkeypatch):

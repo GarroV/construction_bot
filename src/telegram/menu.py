@@ -96,8 +96,10 @@ def build_rm_keyboard(locales, lang: str, cards: list[CardRow]) -> InlineKeyboar
 
 
 def build_report_keyboard(locales, lang: str, cards: list[CardRow]) -> InlineKeyboardMarkup:
-    """[По всем] + по одной кнопке на каждую активную карточку + [Отмена] (владелец:
-    «📊 Отчёт сейчас» должен давать выбор карточки, а не молча гнать по всему чату)."""
+    """[По всем] + по одной кнопке на каждую карточку из `cards` + [Отмена] (владелец:
+    «📊 Отчёт сейчас» должен давать выбор карточки, а не молча гнать по всему чату).
+    Чистая функция рендера — фильтр «только ручные карточки» уже применён вызывающим
+    (send_report_pick)."""
     rows = [[InlineKeyboardButton(text=t(locales, lang, "btn_report_all"), callback_data="m:report:all")]]
     rows += [
         [InlineKeyboardButton(text=f"{c.alias or '#'} (#{c.bitrix_task_id})",
@@ -152,12 +154,18 @@ async def send_rm_keyboard(deps, target: Message, chat: ChatRow) -> None:
 async def send_report_pick(deps, target: Message, chat: ChatRow) -> None:
     """«По чему отчёт?» — диалоговый флоу для голого /report И кнопки «📊 Отчёт сейчас»
     (владелец: кнопка не должна молча гнать отчёт по всему чату). Общий код, как у
-    send_rm_keyboard/send_lang_keyboard выше (паттерн send_*, DRY)."""
+    send_rm_keyboard/send_lang_keyboard выше (паттерн send_*, DRY).
+
+    Кнопки — только по РУЧНЫМ карточкам (`auto_from IS NULL`): владелец, фидбек по
+    скриншоту — авто-подхваченная подзадача («Belgrade-2 / Доработки Dine-in») не должна
+    быть отдельным пунктом выбора, она подразумевается родителем и едет вместе с ним
+    (`process_chat(only_task_id=<родитель>)` включает её сама, см. process_chat)."""
     lang = chat.digest_language
     cards = await repo.list_active_cards(deps.pool, chat.id)
+    manual_cards = [c for c in cards if c.auto_from is None]
     await target.answer(
         t(deps.locales, lang, "report_pick"),
-        reply_markup=build_report_keyboard(deps.locales, lang, cards),
+        reply_markup=build_report_keyboard(deps.locales, lang, manual_cards),
     )
 
 

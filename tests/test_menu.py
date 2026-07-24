@@ -396,6 +396,24 @@ async def test_send_report_pick_builds_keyboard_with_all_and_active_cards(monkey
     assert by_data["m:cancel"] == t(LOCALES, "ru", "btn_cancel")
 
 
+async def test_send_report_pick_hides_auto_discovered_subtask_cards(monkeypatch):
+    """Владелец (фидбек по скриншоту): авто-подхваченная подзадача («Belgrade-2 /
+    Доработки Dine-in») не должна быть отдельным пунктом выбора — она подразумевается
+    родителем. Кнопки — только по РУЧНЫМ карточкам (auto_from IS NULL)."""
+    auto_child = CardRow(id=3, bitrix_task_id=73689, chat_id=1,
+                         alias="Бишкек 8 / Подзадача", active=True, auto_from=8017)
+    deps = make_deps()
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=[*CARDS, auto_child]))
+    target = _msg(reply_text=None)
+
+    await menu.send_report_pick(deps, target, CHAT)
+
+    kwargs = target.answer.await_args.kwargs
+    data = {btn.callback_data for row in kwargs["reply_markup"].inline_keyboard for btn in row}
+    assert data == {"m:report:all", "m:report:8017", "m:report:8018", "m:cancel"}
+    assert "m:report:73689" not in data
+
+
 async def test_send_report_pick_with_no_active_cards_still_offers_all_and_cancel(monkeypatch):
     deps = make_deps()
     monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=[]))
