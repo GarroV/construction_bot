@@ -7,7 +7,7 @@ import pytest
 from src.bitrix.client import BitrixError
 from src.i18n import load_locales
 from src.telegram import commands
-from src.repo import CardRow
+from src.repo import CardRow, ChatRow
 
 
 def make_deps(**over):
@@ -24,6 +24,19 @@ def make_deps(**over):
 
 CHAT = SimpleNamespace(id=1, digest_language="ru", timezone="UTC",
                        digest_time=dt.time(9, 0), restricted=False)
+
+
+def _chat_row(**over):
+    """ChatRow real, а не SimpleNamespace — нужен там, где _ensure_chat_core делает
+    dataclasses.replace(chat, ...) после автоопределения таймзоны (§5)."""
+    base = dict(
+        id=7, country=None, telegram_chat_id=-100, message_thread_id=None,
+        digest_language="ru", digest_time=dt.time(9, 0), timezone="UTC",
+        last_digest_date=None, last_posted_at=None, last_ping_at=None,
+        restricted=False, active=True, created_at=dt.datetime(2026, 1, 1),
+    )
+    base.update(over)
+    return ChatRow(**base)
 
 
 async def test_add_happy_path(monkeypatch):
@@ -154,6 +167,41 @@ async def test_time_validation(monkeypatch):
     set_time.assert_awaited_once_with(deps.pool, 1, dt.time(9, 0), "Asia/Bishkek")
 
 
+async def test_time_accepts_city_name(monkeypatch):
+    """Фидбек владельца (скриншот): партнёр ответил на time-prompt «14:49 белград» —
+    handle_time теперь резолвит город через resolve_tz, а не требует голый IANA."""
+    deps = make_deps()
+    set_time = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+
+    ok = await commands.handle_time(deps, CHAT, "09:00 белград")
+
+    assert "09:00" in ok and "Europe/Belgrade" in ok
+    set_time.assert_awaited_once_with(deps.pool, 1, dt.time(9, 0), "Europe/Belgrade")
+
+
+async def test_time_still_accepts_iana_tz_directly(monkeypatch):
+    deps = make_deps()
+    set_time = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+
+    ok = await commands.handle_time(deps, CHAT, "09:00 Europe/Belgrade")
+
+    assert "09:00" in ok and "Europe/Belgrade" in ok
+    set_time.assert_awaited_once_with(deps.pool, 1, dt.time(9, 0), "Europe/Belgrade")
+
+
+async def test_time_unresolvable_city_falls_back_to_usage(monkeypatch):
+    deps = make_deps()
+    set_time = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+
+    reply = await commands.handle_time(deps, CHAT, "09:00 нарния")
+
+    assert "Использование" in reply
+    set_time.assert_not_awaited()
+
+
 async def test_lang(monkeypatch):
     deps = make_deps()
     set_lang = AsyncMock()
@@ -193,7 +241,7 @@ async def test_ensure_chat_restricted_denies_non_admin(monkeypatch):
     pool.fetch = AsyncMock(return_value=[{"telegram_user_id": 1}])
     deps = make_deps(pool=pool)
     restricted_chat = SimpleNamespace(id=7, restricted=True, digest_language="ru")
-    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=restricted_chat))
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=(restricted_chat, False)))
 
     assert await commands.ensure_chat(deps, _member_msg(user_id=999)) is None
 
@@ -203,7 +251,7 @@ async def test_ensure_chat_restricted_allows_admin(monkeypatch):
     pool.fetch = AsyncMock(return_value=[{"telegram_user_id": 1}])
     deps = make_deps(pool=pool)
     restricted_chat = SimpleNamespace(id=7, restricted=True, digest_language="ru")
-    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=restricted_chat))
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=(restricted_chat, False)))
 
     assert await commands.ensure_chat(deps, _member_msg(user_id=1)) is restricted_chat
 
@@ -212,10 +260,71 @@ async def test_ensure_chat_open_chat_skips_whitelist(monkeypatch):
     pool = AsyncMock()
     deps = make_deps(pool=pool)
     open_chat = SimpleNamespace(id=7, restricted=False, digest_language="ru")
-    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=open_chat))
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=(open_chat, False)))
 
     assert await commands.ensure_chat(deps, _member_msg(user_id=999)) is open_chat
     pool.fetch.assert_not_awaited()
+
+
+def _new_chat_msg(title: str, user_id: int = 555):
+    return SimpleNamespace(
+        chat=SimpleNamespace(id=-100, title=title),
+        from_user=SimpleNamespace(id=user_id),
+        is_topic_message=False,
+        message_thread_id=None,
+    )
+
+
+async def test_ensure_chat_autodetects_timezone_from_title_on_first_contact(monkeypatch):
+    """§5 (фидбек владельца, скриншот): Telegram не отдаёт таймзону юзера — при первом
+    контакте (upsert_chat created=True) бот угадывает её из названия супергруппы и
+    тихо проставляет через set_chat_time (без дополнительного ответа партнёру)."""
+    pool = AsyncMock()
+    deps = make_deps(pool=pool)
+    new_chat = _chat_row(id=7, restricted=False)
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=(new_chat, True)))
+    set_time = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+
+    result = await commands.ensure_chat(deps, _new_chat_msg("Сербия"))
+
+    set_time.assert_awaited_once_with(deps.pool, 7, dt.time(9, 0), "Europe/Belgrade")
+    # ChatRow заменён на месте (dataclasses.replace) — та же команда, если бы это был
+    # голый /time без таймзоны, должна видеть УЖЕ определённую timezone, а не UTC.
+    assert result.timezone == "Europe/Belgrade"
+    assert result.digest_time == dt.time(9, 0)
+
+
+async def test_ensure_chat_unresolvable_title_leaves_default_timezone(monkeypatch):
+    """Тестовый чат «group_za_test» не резолвится ни в один город/страну — таймзона
+    остаётся дефолтной UTC, set_chat_time не вызывается вовсе."""
+    pool = AsyncMock()
+    deps = make_deps(pool=pool)
+    new_chat = _chat_row(id=7, restricted=False)
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=(new_chat, True)))
+    set_time = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+
+    await commands.ensure_chat(deps, _new_chat_msg("group_za_test"))
+
+    set_time.assert_not_awaited()
+
+
+async def test_ensure_chat_existing_chat_never_triggers_autodetection(monkeypatch):
+    """created=False (чат уже существовал) — автоопределение не трогает уже
+    настроенную таймзону, даже если title сейчас резолвится."""
+    pool = AsyncMock()
+    deps = make_deps(pool=pool)
+    existing_chat = _chat_row(id=7, restricted=False)
+    monkeypatch.setattr(
+        commands.repo, "upsert_chat", AsyncMock(return_value=(existing_chat, False))
+    )
+    set_time = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+
+    await commands.ensure_chat(deps, _new_chat_msg("Сербия"))
+
+    set_time.assert_not_awaited()
 
 
 def _callback_obj(*, clicker_id: int, bot_id: int = 42):
@@ -240,7 +349,7 @@ async def test_ensure_chat_for_callback_checks_clicker_not_bot_author(monkeypatc
     pool.fetch = AsyncMock(return_value=[{"telegram_user_id": 777}])
     deps = make_deps(pool=pool)
     restricted_chat = SimpleNamespace(id=7, restricted=True, digest_language="ru")
-    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=restricted_chat))
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=(restricted_chat, False)))
 
     callback = _callback_obj(clicker_id=777, bot_id=42)
     assert await commands.ensure_chat_for_callback(deps, callback) is restricted_chat
@@ -251,7 +360,7 @@ async def test_ensure_chat_for_callback_denies_when_clicker_not_whitelisted(monk
     pool.fetch = AsyncMock(return_value=[{"telegram_user_id": 777}])
     deps = make_deps(pool=pool)
     restricted_chat = SimpleNamespace(id=7, restricted=True, digest_language="ru")
-    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=restricted_chat))
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=(restricted_chat, False)))
 
     callback = _callback_obj(clicker_id=999, bot_id=42)
     assert await commands.ensure_chat_for_callback(deps, callback) is None

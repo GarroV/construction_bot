@@ -1,7 +1,7 @@
+import dataclasses
 import datetime as dt
 import logging
 import re
-from zoneinfo import ZoneInfo
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -12,6 +12,7 @@ from src.bitrix import methods
 from src.bitrix.client import BitrixError
 from src.i18n import t
 from src.telegram.capture import chat_title_of, thread_id_of
+from src.telegram.tz_aliases import resolve_tz
 
 log = logging.getLogger(__name__)
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
@@ -142,11 +143,12 @@ async def handle_time(deps, chat, args: str) -> str:
 
     tz: str | None = None
     if len(parts) > 1:
-        try:
-            ZoneInfo(parts[1])
-        except Exception:
+        # второй+ аргумент — город/страна (человеческое) ИЛИ готовый IANA-идентификатор
+        # (владелец, скриншот фидбека: партнёр пишет «белград», а не «Europe/Belgrade»).
+        resolved = resolve_tz(" ".join(parts[1:]))
+        if resolved is None:
             return t(deps.locales, lang, "time_usage")
-        tz = parts[1]
+        tz = resolved
     elif chat.timezone == "UTC":  # §5: дефолтная UTC без явной tz — просим указать
         return t(deps.locales, lang, "time_need_tz", time=parts[0])
 
@@ -166,7 +168,23 @@ async def handle_membership(deps, telegram_chat_id: int, new_status: str) -> Non
 
 
 async def _ensure_chat_core(deps, chat_id: int, thread_id, title, user_id: int | None):
-    chat = await repo.upsert_chat(deps.pool, chat_id, thread_id, title, deps.settings.default_language)
+    chat, created = await repo.upsert_chat(
+        deps.pool, chat_id, thread_id, title, deps.settings.default_language
+    )
+    if created:
+        # §5 (фидбек владельца, скриншот): при первом контакте пробуем угадать таймзону
+        # чата из названия супергруппы («Сербия» -> Europe/Belgrade) — тихо, без ответа
+        # партнёру (таймзона видна позже через /time). Не резолвится (например тестовое
+        # «group_za_test») -> остаётся дефолтная UTC, как и раньше.
+        tz = resolve_tz(title or "")
+        if tz is not None:
+            default_time = dt.time(9, 0)
+            await repo.set_chat_time(deps.pool, chat.id, default_time, tz)
+            # chat — уже прочитанный ДО этого UPDATE ChatRow: без обновления на месте
+            # дальнейшая логика ЭТОГО ЖЕ запроса (например голый /time без таймзоны
+            # первым сообщением в чате) видела бы устаревшую timezone == "UTC" и
+            # заново просила бы указать таймзону, хотя она уже определена.
+            chat = dataclasses.replace(chat, digest_time=default_time, timezone=tz)
     if not chat.restricted:
         return chat
     admins = {

@@ -22,14 +22,27 @@ async def pool():
 
 
 async def test_upsert_chat_is_idempotent(pool):
-    a = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
-    b = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    a, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    b, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
     assert a.id == b.id
     assert a.digest_language == "ru"
 
 
+async def test_upsert_chat_created_flag_true_only_on_first_insert(pool):
+    """upsert_chat теперь возвращает (ChatRow, created) — created=True только когда
+    запись реально заведена этим вызовом (нужно автоопределению таймзоны из названия
+    чата при первом контакте, §5: повторный upsert существующего чата не должен молча
+    перезатирать таймзону, заданную партнёром через /time)."""
+    first, created_first = await repo.upsert_chat(pool, -100, 7, "Сербия", "ru")
+    second, created_second = await repo.upsert_chat(pool, -100, 7, "Сербия", "ru")
+
+    assert created_first is True
+    assert created_second is False
+    assert first.id == second.id
+
+
 async def test_add_card_lifecycle(pool):
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
 
     r1 = await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 100, 200, 300)
     r2 = await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 100, 200, 300)
@@ -51,7 +64,7 @@ async def test_add_card_lifecycle(pool):
 
 async def test_add_card_manual_has_null_auto_from(pool):
     """Обычный /add (без auto_from) заводит РУЧНУЮ карточку — auto_from IS NULL."""
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
 
     await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 100, 200, 300)
 
@@ -63,7 +76,7 @@ async def test_add_card_manual_has_null_auto_from(pool):
 async def test_add_card_with_auto_from_records_parent_task_id(pool):
     """Дискавери подзадач (фича 1): auto_from хранит bitrix_task_id родителя, от которого
     карточка была авто-подхвачена."""
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
     await repo.add_card(pool, chat.id, 42103, "Белград 2", 555, 0, 0, 0)
 
     outcome = await repo.add_card(
@@ -79,8 +92,8 @@ async def test_add_card_with_auto_from_records_parent_task_id(pool):
 async def test_deactivate_manual_card_cascades_to_auto_children(pool):
     """§ фича 1: снятие РУЧНОЙ карточки деактивирует и её авто-подхваченных детей (детей
     ДРУГИХ родителей и детей в других чатах не трогает)."""
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
-    other_chat = await repo.upsert_chat(pool, -200, 7, "Казахстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    other_chat, _ = await repo.upsert_chat(pool, -200, 7, "Казахстан", "ru")
     await repo.add_card(pool, chat.id, 42103, "Белград 2", 555, 0, 0, 0)
     await repo.add_card(pool, chat.id, 73689, "Белград 2 / Подзадача 1", None, 0, 0, 0, auto_from=42103)
     await repo.add_card(pool, chat.id, 73690, "Белград 2 / Подзадача 2", None, 0, 0, 0, auto_from=42103)
@@ -98,7 +111,7 @@ async def test_deactivate_manual_card_cascades_to_auto_children(pool):
 
 
 async def test_deactivate_card_no_match_returns_false(pool):
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
 
     assert await repo.deactivate_card(pool, chat.id, 12345) is False
 
@@ -106,7 +119,7 @@ async def test_deactivate_card_no_match_returns_false(pool):
 async def test_card_exists_true_for_active_and_inactive(pool):
     """Дискавери не должно реанимировать снятую партнёром вручную карточку — нужен способ
     проверить существование связки НЕЗАВИСИМО от active."""
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
     await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 0, 0, 0)
     await repo.add_card(pool, chat.id, 8018, "Бишкек 9", 555, 0, 0, 0)
     await repo.deactivate_card(pool, chat.id, 8018)
@@ -120,7 +133,7 @@ async def test_last_comment_id_column_defaults_to_zero(pool):
     """Миграция 0002: ALTER TABLE ... ADD COLUMN last_comment_id BIGINT NOT NULL DEFAULT 0 —
     прямая проверка через INSERT без указания last_comment_id (как были бы строки, заведённые
     до миграции)."""
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
     await pool.execute(
         "INSERT INTO cards (bitrix_task_id, chat_id, alias, added_by) VALUES ($1,$2,$3,$4)",
         9999, chat.id, "тест", 1,
@@ -137,7 +150,7 @@ async def test_last_comment_id_column_defaults_to_zero(pool):
 
 
 async def test_cursor_advance_and_marks(pool):
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
     await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 0, 0, 0)
 
     await repo.advance_cursor(pool, 8017, chat.id, 111, 222, 333)
@@ -156,7 +169,7 @@ async def test_cursor_advance_and_marks(pool):
 async def test_add_card_concurrent_race_condition(pool):
     """Simulate 10 concurrent add_card calls for the same (chat_id, task_id) pair.
     Should result in exactly one 'added' and nine 'exists' without exceptions."""
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
 
     # Simulate 10 concurrent calls
     tasks = [
@@ -178,17 +191,18 @@ async def test_add_card_concurrent_race_condition(pool):
 
 async def test_chat_reactivation_on_upsert(pool):
     """Deactivate a chat, then upsert it again — should become active=True."""
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
     assert chat.active is True
 
     await repo.deactivate_chat(pool, chat.id)
     chats = await repo.list_active_chats(pool)
     assert len(chats) == 0
 
-    # Upsert same chat again
-    reactivated = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    # Upsert same chat again — reactivation, NOT a fresh insert (created=False)
+    reactivated, created = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
     assert reactivated.id == chat.id
     assert reactivated.active is True
+    assert created is False
 
     chats = await repo.list_active_chats(pool)
     assert len(chats) == 1
@@ -196,7 +210,7 @@ async def test_chat_reactivation_on_upsert(pool):
 
 async def test_set_chat_language(pool):
     """Test setting chat language updates correctly."""
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
     assert chat.digest_language == "ru"
 
     await repo.set_chat_language(pool, chat.id, "en")
@@ -206,7 +220,7 @@ async def test_set_chat_language(pool):
 
 async def test_set_chat_time_without_timezone(pool):
     """Test setting only digest_time when timezone is None."""
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
     original_tz = chat.timezone
 
     new_time = dt.time(14, 30)
@@ -218,7 +232,7 @@ async def test_set_chat_time_without_timezone(pool):
 
 async def test_set_chat_time_with_timezone(pool):
     """Test setting both digest_time and timezone."""
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
 
     new_time = dt.time(10, 15)
     await repo.set_chat_time(pool, chat.id, new_time, "Europe/Moscow")
@@ -229,7 +243,7 @@ async def test_set_chat_time_with_timezone(pool):
 
 async def test_update_chat_telegram_id(pool):
     """Test updating chat's telegram_chat_id."""
-    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
     assert chat.telegram_chat_id == -100
 
     await repo.update_chat_telegram_id(pool, chat.id, -200)

@@ -49,18 +49,30 @@ def _chat(r: asyncpg.Record) -> ChatRow:
     return ChatRow(**dict(r))
 
 
-async def upsert_chat(pool, telegram_chat_id, message_thread_id, country, language) -> ChatRow:
+async def upsert_chat(
+    pool, telegram_chat_id, message_thread_id, country, language
+) -> tuple[ChatRow, bool]:
+    """Возвращает (ChatRow, created) — created=True, только если запись чата заведена
+    ИМЕННО этим вызовом (не существовала раньше). Нужно для автоопределения таймзоны
+    из названия чата при первом контакте (§5): триггерить его на каждый upsert
+    существующего чата было бы и накладно, и неверно семантически (тихо перезаписало
+    бы таймзону, заданную партнёром через /time). `xmax = 0` — стандартный приём
+    Postgres для различения INSERT/UPDATE внутри одного `... ON CONFLICT DO UPDATE
+    RETURNING`: xmax остаётся нулевым только для строки, вставленной в этой же
+    команде."""
     row = await pool.fetchrow(
         f"""
         INSERT INTO chats (telegram_chat_id, message_thread_id, country, digest_language)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (telegram_chat_id, message_thread_id)
         DO UPDATE SET active = TRUE
-        RETURNING {_CHAT_COLS}
+        RETURNING {_CHAT_COLS}, (xmax = 0) AS inserted
         """,
         telegram_chat_id, message_thread_id, country, language,
     )
-    return _chat(row)
+    data = dict(row)
+    created = data.pop("inserted")
+    return ChatRow(**data), created
 
 
 async def list_active_chats(pool) -> list[ChatRow]:
