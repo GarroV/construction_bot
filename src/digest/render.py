@@ -1,4 +1,5 @@
 import html
+import re
 
 from src.digest.llm import CardDelta
 from src.i18n import t
@@ -22,19 +23,45 @@ def _checklist_line(delta: CardDelta, locales, lang: str) -> str:
              done=delta.checklist_done, total=delta.checklist_total)
 
 
+def _linkify_mentioned_files(escaped_summary: str, files, summary: str) -> str:
+    """Инлайн-ссылка (§8 фича 2): имя файла упомянуто LLM дословно в тексте выжимки —
+    превращаем его прямо там в кликабельную ссылку на комментарий-источник, вместо дубля
+    в 📎-блоке ниже.
+
+    Ревью-фикс (Critical): раньше это была цепочка последовательных `.replace()` — при
+    ДВУХ файлах с одинаковым именем второй `.replace()` заворачивал уже вставленный первым
+    `<a>` повторно (`<a><a>...</a></a>`), Telegram такое молча ронял (TelegramBadRequest,
+    #send_html), и дайджест карточки не отправлялся. Теперь — один проход `re.sub` по
+    альтернации экранированных имён:
+    - дедуп по имени: несколько файлов с одинаковым именем -> первый url побеждает, второй
+      якорь не нужен (оба всё равно "упомянуты" одним и тем же именем в тексте);
+    - альтернация отсортирована по длине имени УБЫВАЮЩЕ, чтобы длинное имя
+      ("план.pdf.bak") матчилось раньше своей же подстроки ("план.pdf") и не рвалось пополам;
+    - один проход re.sub физически не может вложить `<a>` друг в друга — replacement
+      подставляется в результирующую строку, а не сканируется повторно.
+    """
+    name_to_url: dict[str, str] = {}
+    for f in files:
+        if f.url and f.name in summary and f.name not in name_to_url:
+            name_to_url[f.name] = f.url
+
+    if not name_to_url:
+        return escaped_summary
+
+    anchors = {
+        html.escape(name): f'<a href="{html.escape(url, quote=True)}">{html.escape(name)}</a>'
+        for name, url in name_to_url.items()
+    }
+    pattern = re.compile("|".join(re.escape(n) for n in sorted(anchors, key=len, reverse=True)))
+    return pattern.sub(lambda m: anchors[m.group(0)], escaped_summary)
+
+
 def card_message(delta: CardDelta, summary: str | None, task_url: str, locales, lang: str) -> str:
     header = f'🏗 <b><a href="{html.escape(task_url, quote=True)}">{html.escape(delta.alias)}</a></b>'
     lines = [header, _checklist_line(delta, locales, lang)]
     if summary is not None:
         escaped_summary = html.escape(summary.strip())
-        for f in delta.files:
-            if f.url and f.name in summary:
-                # Инлайн-ссылка (§8 фича 2): имя файла упомянуто LLM дословно в тексте
-                # выжимки — превращаем его прямо там в кликабельную ссылку на комментарий-
-                # источник, вместо дубля в 📎-блоке ниже.
-                escaped_name = html.escape(f.name)
-                anchor = f'<a href="{html.escape(f.url, quote=True)}">{escaped_name}</a>'
-                escaped_summary = escaped_summary.replace(escaped_name, anchor)
+        escaped_summary = _linkify_mentioned_files(escaped_summary, delta.files, summary)
         lines.append(escaped_summary)
     else:  # деградация без LLM (§7 п.6)
         lines.append(t(locales, lang, "fallback_notice"))

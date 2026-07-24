@@ -208,3 +208,56 @@ def test_fallback_mode_shows_footer_links_without_inlining_names():
     # в самом fallback-тексте (сырые task_changes) имя НЕ обёрнуто в <a> — только в 📎-блоке
     assert "план.pdf: добавлен" in msg
     assert msg.count("<a ") == 2  # заголовок карточки + одна ссылка в 📎-блоке
+
+
+# --- Ревью-фикс (Critical): одно-проходная инлайн-линковка — дубликаты/подстроки имён ---
+
+
+def test_card_message_duplicate_file_names_get_one_anchor_each_no_nesting():
+    """Регрессия: два файла с ОДИНАКОВЫМ именем ("IMG.jpg" дважды в тексте) — цепочка
+    последовательных .replace() заворачивала уже вставленный <a> повторно (вложенные
+    <a><a>...</a></a>), Telegram такое молча ронял (TelegramBadRequest -> карточка не
+    отправлялась). Один re.sub-проход обязан обернуть каждое вхождение РОВНО одним <a>,
+    без вложенности; дубль имени в mapping — первый url побеждает."""
+    delta = CardDelta(
+        task_id=1, alias="X", task_changes=[], comments=[],
+        checklist_done=0, checklist_total=0,
+        files=[
+            FileLink(name="IMG.jpg", url="https://p/task/1/?commentId=5#com5"),
+            FileLink(name="IMG.jpg", url="https://p/task/1/?commentId=9#com9"),
+        ],
+        new_history_id=0, new_message_id=0,
+    )
+    msg = render.card_message(
+        delta, "Сначала прислали IMG.jpg, потом ещё раз IMG.jpg для сравнения",
+        "https://p/task/1/", LOCALES, "ru",
+    )
+    assert "</a></a>" not in msg and "<a><a" not in msg  # никакой вложенности
+    assert msg.count('<a href="https://p/task/1/?commentId=5#com5">IMG.jpg</a>') == 2
+    assert "commentId=9" not in msg  # дубль имени — второй url в mapping не используется
+    assert "📎" not in msg  # оба вхождения инлайн — footer пуст
+
+
+def test_card_message_substring_file_names_link_independently():
+    """Регрессия: "план.pdf" — подстрока "план.pdf.bak". Последовательный .replace() по
+    короткому имени порвал бы длинное пополам. Сортировка альтернации по убыванию длины
+    обязана залинковать каждое своим url без пересечений."""
+    delta = CardDelta(
+        task_id=1, alias="X", task_changes=[], comments=[],
+        checklist_done=0, checklist_total=0,
+        files=[
+            FileLink(name="план.pdf", url="https://p/task/1/?commentId=5#com5"),
+            FileLink(name="план.pdf.bak", url="https://p/task/1/?commentId=9#com9"),
+        ],
+        new_history_id=0, new_message_id=0,
+    )
+    msg = render.card_message(
+        delta, "Актуальный план.pdf и старая копия план.pdf.bak для сверки",
+        "https://p/task/1/", LOCALES, "ru",
+    )
+    assert '<a href="https://p/task/1/?commentId=5#com5">план.pdf</a>' in msg
+    assert '<a href="https://p/task/1/?commentId=9#com9">план.pdf.bak</a>' in msg
+    assert "</a></a>" not in msg and "<a><a" not in msg
+    # план.pdf не должен был "откусить" префикс план.pdf.bak и оставить хвост ".bak" снаружи тега
+    assert "</a>.bak" not in msg
+    assert "📎" not in msg
