@@ -65,6 +65,23 @@ def build_prompt(template: str, delta: CardDelta, language: str, date_str: str) 
     )
 
 
+def build_overview_prompt(template: str, overview: CardDelta, language: str, date_str: str) -> str:
+    """Промпт «сводка текущего состояния» (§5, «Отчёт по запросу всегда с содержимым»):
+    та же форма, что build_prompt, но без task_changes/files-плейсхолдеров — prompts/
+    overview.txt их не содержит (владелец: сводка не про ЧТО изменилось, а про ГДЕ
+    стройка сейчас — по последним комментариям и чек-листу, независимо от курсора).
+    Принимает CardDelta целиком (как build_prompt), а не россыпь полей — один и тот
+    же паттерн для обоих промптов, меньше поверхность аргументов."""
+    return template.format(
+        language=language,
+        date=date_str,
+        pizzeria_name=overview.alias,
+        checklist_done=overview.checklist_done,
+        checklist_total=overview.checklist_total,
+        comments="\n".join(_comment_line(m) for m in overview.comments) or "-",
+    )
+
+
 def _is_client_error(e: Exception) -> bool:
     """4xx от OpenAI — ошибка запроса (промпт/параметры), ретраить бессмысленно.
     Исключение — 429 (RateLimitError): это транзиентный лимит, а не ошибка запроса,

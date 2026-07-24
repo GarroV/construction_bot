@@ -81,6 +81,63 @@ def test_no_changes_line():
     assert line.startswith("🏗 <b>")
 
 
+# --- overview_message / report_empty_card_line (§5, «Отчёт по запросу всегда с содержимым») ---
+
+
+def test_report_empty_card_line_composes_header_and_trailing_text():
+    line = render.report_empty_card_line("Бишкек 8", "https://p/task/8017/",
+                                         "С последнего дайджеста (20.07 14:30) изменений нет")
+    assert line.startswith("🏗 <b>")
+    assert "Бишкек 8" in line
+    assert "20.07 14:30" in line
+
+
+def test_overview_message_includes_notice_checklist_and_summary():
+    overview = CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[],
+        comments=[ChatMessage(id=1, author="Иван", text="план готов", file_ids=[])],
+        checklist_done=3, checklist_total=10, files=[],
+        new_history_id=20, new_message_id=200,
+    )
+    msg = render.overview_message(
+        overview, "Обсудили план, согласовали сроки.", "https://p/task/8017/", LOCALES, "ru",
+        "Новых изменений с 20.07 14:30 нет — текущее состояние:",
+    )
+    assert msg.startswith("🏗 <b>")
+    assert "Новых изменений с 20.07 14:30 нет — текущее состояние:" in msg
+    assert "📋 Чек-лист: 3/10" in msg
+    assert "Обсудили план, согласовали сроки." in msg
+
+
+def test_overview_message_fallback_without_llm_lists_raw_comments():
+    overview = CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[],
+        comments=[ChatMessage(id=1, author="Иван", text="план готов", file_ids=[])],
+        checklist_done=0, checklist_total=0, files=[],
+        new_history_id=0, new_message_id=0,
+    )
+    msg = render.overview_message(
+        overview, None, "https://p/task/8017/", LOCALES, "ru", "notice-текст",
+    )
+    assert "Краткая версия" in msg  # fallback_notice (ru)
+    assert "Иван" in msg and "план готов" in msg
+
+
+def test_overview_message_footer_reuses_files_linkify_logic():
+    """overview_message использует ту же 📎-страховку/инлайн-линковку, что card_message
+    (общий _files_footer/_linkify_mentioned_files) — файл без ссылки не теряется молча."""
+    overview = CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[],
+        comments=[ChatMessage(id=1, author="Иван", text="скинул файл", file_ids=[])],
+        checklist_done=0, checklist_total=0,
+        files=[FileLink(name="без ссылки", url=None)],
+        new_history_id=0, new_message_id=0,
+    )
+    msg = render.overview_message(overview, "Ничего особенного.", "https://p/task/8017/",
+                                  LOCALES, "ru", "notice")
+    assert "📎 без ссылки" in msg
+
+
 def test_clip_cuts_on_line_boundary():
     text = "\n".join(f"строка {i} " + "x" * 100 for i in range(100))
     clipped = render.clip(text, limit=1000)

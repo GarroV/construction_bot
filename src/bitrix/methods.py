@@ -67,6 +67,28 @@ async def fetch_new_chat_messages(
             return messages, users
 
 
+async def fetch_latest_chat_messages(
+    bx: BitrixClient, chat_id: int, limit: int
+) -> tuple[list[dict], dict]:
+    """Последние `limit` сообщений чата задачи НЕЗАВИСИМО от курсора (§5, «Отчёт по
+    запросу всегда с содержимым» — сводка текущего состояния по требованию, а не по
+    дельте): im.dialog.messages.get без FIRST_ID отдаёт самые свежие сообщения — тот же
+    приём, что уже использует get_latest_chat_message_id ниже, просто с полными записями,
+    а не только максимальным id."""
+    res = await bx.call("im.dialog.messages.get", {"DIALOG_ID": f"chat{chat_id}", "LIMIT": limit})
+    return res.get("messages", []), _merge_users({}, res.get("users"))
+
+
+async def fetch_latest_comments(bx: BitrixClient, task_id: int, limit: int) -> list[dict]:
+    """Последние `limit` комментариев карточки НЕЗАВИСИМО от курсора — аналог
+    fetch_latest_chat_messages для старых карточек без чата задачи (§13). Портал не
+    пагинирует task.commentitem.getlist (см. _comment_records), поэтому режем на клиенте:
+    сортируем по возрастанию id и берём хвост."""
+    ordered = sorted(_comment_records(await bx.call("task.commentitem.getlist", {"taskId": task_id})),
+                     key=lambda r: int(r["ID"]))
+    return ordered[-limit:] if limit > 0 else []
+
+
 def _comment_records(res) -> list[dict]:
     """task.commentitem.getlist на живом коробочном портале отдаёт голый список без
     пагинации (проверено смоуком: 314 шт. на Belgrade-2); на всякий случай терпим и

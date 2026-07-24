@@ -96,3 +96,98 @@ async def test_collect_card_delta_old_card_uses_comments_and_skips_chat(monkeypa
     fetch_comments.assert_awaited_once_with(bx, 8017, 100)
     fetch_chat.assert_not_awaited()
     resolve_files.assert_not_awaited()
+
+
+# --- collect_card_overview: сводка «текущее состояние» (§5, «Отчёт по запросу») ---
+
+
+async def test_collect_card_overview_new_chat_takes_latest_k_independent_of_cursor(monkeypatch):
+    """Карточка с чатом задачи: последние k сообщений через fetch_latest_chat_messages
+    (НЕ fetch_new_chat_messages) — курсор в вызов вообще не передаётся."""
+    monkeypatch.setattr(collector.methods, "get_task",
+                        AsyncMock(return_value={"title": "Бишкек 8", "chatId": 42}))
+    fetch_latest = AsyncMock(return_value=(
+        [{"id": 202, "author_id": 5, "text": "ок", "files": [{"id": 777}]}],
+        {"5": {"id": 5, "name": "Иван"}},
+    ))
+    monkeypatch.setattr(collector.methods, "fetch_latest_chat_messages", fetch_latest)
+    monkeypatch.setattr(collector.methods, "get_checklist_summary", AsyncMock(return_value=(
+        ChecklistSummary(done=3, total=10, has_stages=False, stage_title=None, stage_done=0, stage_total=0)
+    )))
+    monkeypatch.setattr(collector.links, "resolve_files",
+                        AsyncMock(return_value=[FileLink(name="план.pdf", url="https://p/1")]))
+
+    bx = object()
+    overview = await collector.collect_card_overview(bx, CARD, CUR, k=5)
+
+    assert overview.has_changes
+    assert overview.comments[0].author == "Иван"
+    assert overview.task_changes == []  # обзору история изменений не нужна
+    assert (overview.checklist_done, overview.checklist_total) == (3, 10)
+    fetch_latest.assert_awaited_once_with(bx, 42, 5)
+
+
+async def test_collect_card_overview_keeps_cursor_values_unchanged(monkeypatch):
+    """Курсоры НЕ двигаются: new_*_id возвращаются как есть из переданного cursor,
+    независимо от того, что нашлось в комментариях (владелец: advance в report-пути
+    должен быть безопасным no-op)."""
+    monkeypatch.setattr(collector.methods, "get_task",
+                        AsyncMock(return_value={"title": "Бишкек 8", "chatId": 42}))
+    monkeypatch.setattr(collector.methods, "fetch_latest_chat_messages", AsyncMock(return_value=(
+        [{"id": 9999, "author_id": 5, "text": "новое-новое"}], {"5": {"id": 5, "name": "Иван"}},
+    )))
+    monkeypatch.setattr(collector.methods, "get_checklist_summary", AsyncMock(return_value=(
+        ChecklistSummary(done=0, total=0, has_stages=False, stage_title=None, stage_done=0, stage_total=0)
+    )))
+
+    overview = await collector.collect_card_overview(object(), CARD, CUR)
+
+    assert overview.new_history_id == CUR.last_history_id
+    assert overview.new_message_id == CUR.last_message_id
+    assert overview.new_comment_id == CUR.last_comment_id
+
+
+async def test_collect_card_overview_old_card_uses_latest_comments_and_comment_url(monkeypatch):
+    """Старая карточка (нет chatId): fetch_latest_comments, файлы — ссылка на
+    комментарий-источник (как у collect_card_delta), im.dialog.messages.get не зовётся."""
+    bx = SimpleNamespace(webhook_url=BX_BASE, webhook_user_id=123)
+    monkeypatch.setattr(collector.methods, "get_task",
+                        AsyncMock(return_value={"title": "Старая стройка"}))  # нет chatId
+    fetch_latest_comments = AsyncMock(return_value=[
+        {"ID": "103", "AUTHOR_NAME": "Пётр", "POST_MESSAGE": "план готов",
+         "ATTACHED_OBJECTS": {"1": {"NAME": "план.pdf",
+                                     "DOWNLOAD_URL": "secret", "VIEW_URL": "secret"}}},
+    ])
+    monkeypatch.setattr(collector.methods, "fetch_latest_comments", fetch_latest_comments)
+    fetch_chat = AsyncMock()
+    monkeypatch.setattr(collector.methods, "fetch_latest_chat_messages", fetch_chat)
+    monkeypatch.setattr(collector.methods, "get_checklist_summary", AsyncMock(return_value=(
+        ChecklistSummary(done=1, total=2, has_stages=False, stage_title=None, stage_done=0, stage_total=0)
+    )))
+
+    overview = await collector.collect_card_overview(bx, CARD, CUR, k=5)
+
+    assert overview.comments[0].author == "Пётр"
+    assert overview.files == [FileLink(
+        name="план.pdf",
+        url="https://portal.bitrix24.ru/company/personal/user/123/tasks/task/view/8017/"
+            "?commentId=103#com103",
+    )]
+    fetch_latest_comments.assert_awaited_once_with(bx, 8017, 5)
+    fetch_chat.assert_not_awaited()
+
+
+async def test_collect_card_overview_no_comments_has_no_changes(monkeypatch):
+    """0 комментариев за всё время -> has_changes False (process_chat решает падать на
+    report_empty-текст для этой карточки, а не пытаться строить LLM-сводку из ничего)."""
+    monkeypatch.setattr(collector.methods, "get_task",
+                        AsyncMock(return_value={"title": "Бишкек 8", "chatId": 42}))
+    monkeypatch.setattr(collector.methods, "fetch_latest_chat_messages",
+                        AsyncMock(return_value=([], {})))
+    monkeypatch.setattr(collector.methods, "get_checklist_summary", AsyncMock(return_value=(
+        ChecklistSummary(done=0, total=0, has_stages=False, stage_title=None, stage_done=0, stage_total=0)
+    )))
+
+    overview = await collector.collect_card_overview(object(), CARD, CUR)
+
+    assert not overview.has_changes

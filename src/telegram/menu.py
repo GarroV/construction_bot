@@ -47,7 +47,7 @@ from aiogram.types import (
 )
 
 from src import repo
-from src.digest.scheduler import _chat_label, process_chat, safe_zoneinfo
+from src.digest.scheduler import format_last_posted_at, process_chat
 from src.i18n import t
 from src.repo import CardRow, ChatRow
 from src.telegram.commands import (
@@ -169,27 +169,31 @@ async def send_report_pick(deps, target: Message, chat: ChatRow) -> None:
     )
 
 
-_REPORT_EMPTY_DATE_FMT = "%d.%m %H:%M"
-
-
 def _report_empty_text(deps, chat: ChatRow) -> str:
     """report_empty с датой последнего дайджеста в таймзоне чата (владелец: голое
     «изменений нет» неинформативно — с какого момента?). last_posted_at IS NULL
     (чат подключили, но ни один дайджест ещё не ушёл) -> отдельный текст
-    report_empty_never, без даты-заглушки."""
+    report_empty_never, без даты-заглушки. Последний fallback report-пути (§5): с тех
+    пор, как process_chat зовётся с overview_on_empty=True, posted почти всегда True —
+    эта ветка остаётся на случай, когда в scope вообще нет ни одной карточки."""
     lang = chat.digest_language
-    if chat.last_posted_at is None:
+    date_label = format_last_posted_at(chat)
+    if date_label is None:
         return t(deps.locales, lang, "report_empty_never")
-    local = chat.last_posted_at.astimezone(safe_zoneinfo(chat.timezone, _chat_label(chat)))
-    return t(deps.locales, lang, "report_empty", date=local.strftime(_REPORT_EMPTY_DATE_FMT))
+    return t(deps.locales, lang, "report_empty", date=date_label)
 
 
 async def run_report(deps, chat: ChatRow, only_task_id: int | None = None) -> None:
     """Общее ядро для /report (текстом) и m:report:*-кнопок (§5): тот же пайплайн, что и
     у планировщика, но mark_run=False — курсоры двигаются, last_digest_date нет.
-    only_task_id — точечный отчёт по одной карточке (см. process_chat), None — по всем."""
+    only_task_id — точечный отчёт по одной карточке (см. process_chat), None — по всем.
+    overview_on_empty=True всегда (владелец: «если человек нажал что нужен дайджест —
+    значит надо дайджест» — явный запрос никогда не должен отвечать голым «изменений
+    нет», карточки без новых изменений получают сводку текущего состояния)."""
     now_utc = dt.datetime.now(dt.timezone.utc)
-    errors, posted = await process_chat(deps, chat, now_utc, mark_run=False, only_task_id=only_task_id)
+    errors, posted = await process_chat(
+        deps, chat, now_utc, mark_run=False, only_task_id=only_task_id, overview_on_empty=True,
+    )
     if not posted:
         await deps.send_fn(
             deps.bot, chat.telegram_chat_id, chat.message_thread_id,

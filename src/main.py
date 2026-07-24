@@ -33,6 +33,7 @@ async def main() -> None:
             locales=load_locales(),
             settings=s,
             prompt_template=llm_mod.load_prompt(),
+            overview_template=llm_mod.load_prompt("prompts/overview.txt"),
         )
         if s.dry_run:
             deps.send_fn = dry_run_send

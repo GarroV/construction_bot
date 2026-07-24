@@ -13,6 +13,7 @@ from src.telegram.send import SendResult
 UTC = dt.timezone.utc
 LOCALES = load_locales()
 PROMPT = llm.load_prompt()
+OVERVIEW_PROMPT = llm.load_prompt("prompts/overview.txt")
 
 CARD = CardRow(id=1, bitrix_task_id=8017, chat_id=1, alias="Бишкек 8", active=True)
 CARD2 = CardRow(id=2, bitrix_task_id=8018, chat_id=1, alias="Бишкек 9", active=True)
@@ -65,6 +66,7 @@ def make_deps(send_fn, **settings_over) -> scheduler.Deps:
         locales=LOCALES,
         settings=settings,
         prompt_template=PROMPT,
+        overview_template=OVERVIEW_PROMPT,
         send_fn=send_fn,
     )
 
@@ -716,6 +718,147 @@ async def test_only_task_id_direct_auto_child_does_not_pull_in_parent_or_sibling
     assert "view/8017/" not in text   # родитель не подтянулся
     assert "Бишкек 9" not in text     # сосед тем более
     repo_mocks.advance_cursor.assert_awaited_once_with(deps.pool, 73689, chat.id, 5, 9, 0)
+
+
+# --- overview_on_empty: «Отчёт по запросу всегда с содержимым» (§5) ---
+# Владелец: «если человек нажал что нужен дайджест — значит надо дайджест» — явный
+# запрос (кнопки/report/force_report, mark_run=False) не должен отвечать голым
+# «изменений нет»; ежедневный тик (overview_on_empty=False, дефолт) не меняется.
+
+def _overview_with_comments():
+    from src.bitrix.parse import ChatMessage
+    return CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[],
+        comments=[ChatMessage(id=1, author="Иван", text="план готов", file_ids=[])],
+        checklist_done=3, checklist_total=10, files=[],
+        new_history_id=20, new_message_id=200,
+    )
+
+
+def _overview_empty():
+    return CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[], comments=[],
+        checklist_done=0, checklist_total=0, files=[],
+        new_history_id=20, new_message_id=200,
+    )
+
+
+async def test_overview_on_empty_calls_collect_card_overview_and_sends_notice(monkeypatch):
+    """Пустая дельта + overview_on_empty=True -> collect_card_overview вызван (с тем же
+    cursor'ом, что уже читали для дельты), блок содержит report_no_new-строку и
+    LLM-сводку; курсор карточки НЕ сдвинут (advance_cursor вообще не вызывается —
+    исходная delta.has_changes осталась False, тот же путь, что и у обычного
+    no_changes_line)."""
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", AsyncMock(return_value=DELTA_EMPTY))
+    overview_mock = AsyncMock(return_value=_overview_with_comments())
+    monkeypatch.setattr(scheduler.collector, "collect_card_overview", overview_mock)
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="Стройка идёт по плану."))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(
+        deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC), mark_run=False, overview_on_empty=True,
+    )
+
+    assert not errors
+    assert posted is True
+    overview_mock.assert_awaited_once_with(deps.bx, CARD, CUR)
+    text = send_fn.await_args.args[3]
+    assert "Новых изменений с момента подключения нет" in text  # chat.last_posted_at is None
+    assert "Стройка идёт по плану." in text
+    repo_mocks.advance_cursor.assert_not_awaited()  # курсор фактически не двигается
+
+
+async def test_overview_on_empty_uses_report_no_new_with_date_when_chat_has_posted_before(monkeypatch):
+    chat = make_chat(last_posted_at=dt.datetime(2026, 7, 20, 12, 30, tzinfo=UTC))  # UTC-чат
+    patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", AsyncMock(return_value=DELTA_EMPTY))
+    monkeypatch.setattr(scheduler.collector, "collect_card_overview",
+                        AsyncMock(return_value=_overview_with_comments()))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="Сводка."))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    await scheduler.process_chat(
+        deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC), mark_run=False, overview_on_empty=True,
+    )
+
+    text = send_fn.await_args.args[3]
+    assert "20.07 12:30" in text
+
+
+async def test_overview_on_empty_no_material_falls_back_to_report_empty_text(monkeypatch):
+    """collect_card_overview не находит ВООБЩЕ ничего (0 комментариев за всё время) ->
+    строка report_empty/never для этой карточки, LLM не вызывается."""
+    chat = make_chat()
+    patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", AsyncMock(return_value=DELTA_EMPTY))
+    monkeypatch.setattr(scheduler.collector, "collect_card_overview",
+                        AsyncMock(return_value=_overview_empty()))
+    summarize_mock = AsyncMock(return_value="не должно вызваться")
+    monkeypatch.setattr(scheduler.llm, "summarize", summarize_mock)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(
+        deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC), mark_run=False, overview_on_empty=True,
+    )
+
+    assert not errors
+    assert posted is True
+    summarize_mock.assert_not_awaited()
+    text = send_fn.await_args.args[3]
+    assert "С момента подключения изменений нет" in text
+    assert "Бишкек 8" in text  # шапка карточки не потеряна
+
+
+async def test_overview_llm_unavailable_falls_back_to_raw_comments(monkeypatch):
+    """LLM недоступен при построении сводки overview -> тот же fallback-паттерн, что и
+    у обычного дайджеста: сырой список последних комментариев, ошибка в errors, но блок
+    всё равно уходит (не молчание)."""
+    chat = make_chat()
+    patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", AsyncMock(return_value=DELTA_EMPTY))
+    monkeypatch.setattr(scheduler.collector, "collect_card_overview",
+                        AsyncMock(return_value=_overview_with_comments()))
+    monkeypatch.setattr(scheduler.llm, "summarize",
+                        AsyncMock(side_effect=llm.LlmUnavailable("недоступен")))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(
+        deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC), mark_run=False, overview_on_empty=True,
+    )
+
+    assert errors
+    assert posted is True
+    text = send_fn.await_args.args[3]
+    assert "Краткая версия" in text  # fallback_notice (ru)
+    assert "Иван" in text and "план готов" in text
+
+
+async def test_overview_on_empty_false_default_stays_silent_and_skips_overview(monkeypatch):
+    """Дефолт (тик) — поведение не меняется: полностью пустой чат молчит, overview даже
+    не собирается (не тратим лишние вызовы Битрикса на прогоне по расписанию)."""
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", AsyncMock(return_value=DELTA_EMPTY))
+    overview_mock = AsyncMock(return_value=_overview_with_comments())
+    monkeypatch.setattr(scheduler.collector, "collect_card_overview", overview_mock)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    # чат создан 2026-07-01, прогон на следующий день — пинг ещё не наступил (§7 п.5)
+    errors, posted = await scheduler.process_chat(
+        deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC),
+    )
+
+    assert posted is False
+    send_fn.assert_not_awaited()
+    overview_mock.assert_not_awaited()
+    repo_mocks.mark_digest_run.assert_awaited_once()
 
 
 async def test_discovery_calls_list_subtasks_only_for_manual_cards(monkeypatch):

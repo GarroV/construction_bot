@@ -323,6 +323,19 @@ async def test_run_report_passes_only_task_id_through_to_process_chat(monkeypatc
     assert process_chat_mock.await_args.kwargs["only_task_id"] == 8017
 
 
+async def test_run_report_always_passes_overview_on_empty_true(monkeypatch):
+    """Владелец: явный запрос отчёта никогда не должен отвечать голым «изменений нет» —
+    все report-пути (кнопки/команда) идут через run_report, которая всегда включает
+    overview_on_empty (§5, «Отчёт по запросу всегда с содержимым»)."""
+    deps = make_deps()
+    process_chat_mock = AsyncMock(return_value=([], True))
+    monkeypatch.setattr(menu, "process_chat", process_chat_mock)
+
+    await menu.run_report(deps, CHAT)
+
+    assert process_chat_mock.await_args.kwargs["overview_on_empty"] is True
+
+
 # --- report_empty: дата последнего дайджеста в таймзоне чата / ветка "никогда" ---
 
 async def test_report_empty_includes_formatted_date_in_chat_timezone(monkeypatch):

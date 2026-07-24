@@ -184,3 +184,46 @@ async def test_get_latest_comment_id_empty_list_returns_zero():
         latest = await methods.get_latest_comment_id(bx, 8017)
 
     assert latest == 0
+
+
+# --- fetch_latest_*: последние k НЕЗАВИСИМО от курсора (§5, «Отчёт по запросу») ---
+
+@respx.mock
+async def test_fetch_latest_comments_takes_last_k_sorted_ascending():
+    records = json.loads((FIX / "comments_page.json").read_text())  # id 100, 103, 101
+    respx.get(BASE + "task.commentitem.getlist.json").respond(json={"result": records})
+    async with httpx.AsyncClient() as http:
+        bx = BitrixClient(BASE, http, min_interval=0)
+
+        latest = await methods.fetch_latest_comments(bx, 8017, limit=2)
+
+    assert [int(r["ID"]) for r in latest] == [101, 103]  # 2 самых свежих по id, порядок asc
+
+
+@respx.mock
+async def test_fetch_latest_comments_limit_bigger_than_available_returns_all():
+    records = json.loads((FIX / "comments_page.json").read_text())
+    respx.get(BASE + "task.commentitem.getlist.json").respond(json={"result": records})
+    async with httpx.AsyncClient() as http:
+        bx = BitrixClient(BASE, http, min_interval=0)
+
+        latest = await methods.fetch_latest_comments(bx, 8017, limit=50)
+
+    assert [int(r["ID"]) for r in latest] == [100, 101, 103]
+
+
+@respx.mock
+async def test_fetch_latest_chat_messages_no_first_id_param():
+    route = respx.get(BASE + "im.dialog.messages.get.json")
+    route.respond(json={"result": {"messages": [{"id": 202, "author_id": 5, "text": "ok"}],
+                                   "users": [{"id": 5, "name": "Иван"}]}})
+    async with httpx.AsyncClient() as http:
+        bx = BitrixClient(BASE, http, min_interval=0)
+
+        msgs, users = await methods.fetch_latest_chat_messages(bx, chat_id=42, limit=5)
+
+    assert [m["id"] for m in msgs] == [202]
+    assert users["5"]["name"] == "Иван"
+    q = route.calls[0].request.url.params
+    assert q["DIALOG_ID"] == "chat42" and q["LIMIT"] == "5"
+    assert "FIRST_ID" not in q  # независимо от курсора — без FIRST_ID отдаёт самые свежие

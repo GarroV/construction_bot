@@ -31,6 +31,7 @@ class Deps:
     locales: dict
     settings: Any
     prompt_template: str
+    overview_template: str = ""  # prompts/overview.txt (§5, «Отчёт по запросу»)
     send_fn: SendFn = field(default=send_html)
     bot_username: str = ""  # для строгой адресации команд в группах
 
@@ -51,6 +52,21 @@ def safe_zoneinfo(tz: str, chat_label: str = "") -> ZoneInfo:
     except Exception:
         log.warning("невалидная таймзона %r у чата %s — fallback на UTC", tz, chat_label or "?")
         return ZoneInfo("UTC")
+
+
+_REPORT_DATE_FMT = "%d.%m %H:%M"
+
+
+def format_last_posted_at(chat: ChatRow) -> str | None:
+    """`chats.last_posted_at` в таймзоне чата, формат «ДД.ММ ЧЧ:ММ»; None, если дайджест
+    ещё ни разу не уходил (last_posted_at IS NULL) — вызывающий сам решает, каким текстом
+    закрыть этот случай (report_empty_never/report_no_new_never). Общая точка для
+    menu._report_empty_text и process_chat (§5, «Отчёт по запросу всегда с содержимым»,
+    report_no_new-нотис) — один расчёт даты, а не два независимых."""
+    if chat.last_posted_at is None:
+        return None
+    local = chat.last_posted_at.astimezone(safe_zoneinfo(chat.timezone, _chat_label(chat)))
+    return local.strftime(_REPORT_DATE_FMT)
 
 
 def is_digest_due(chat: ChatRow, now_utc: dt.datetime) -> bool:
@@ -114,7 +130,7 @@ async def _discover_subtasks(deps: Deps, chat: ChatRow, cards: list[CardRow]) ->
 
 async def process_chat(
     deps: Deps, chat: ChatRow, now_utc: dt.datetime, mark_run: bool = True,
-    only_task_id: int | None = None,
+    only_task_id: int | None = None, overview_on_empty: bool = False,
 ) -> tuple[list[str], bool]:
     """Прогон дайджеста чата. mark_run=False — «Отчёт сейчас» (/report, §5): курсоры
     двигаются как в обычном тике, но last_digest_date НЕ трогаем (дневной дайджест по
@@ -130,7 +146,18 @@ async def process_chat(
     дочерней карточки `auto_from` не совпадает с её же `only_task_id`). Прочие карточки чата
     (в т.ч. их блоки «изменений нет») в сообщение вообще не попадают, а дискавери подзадач
     пропускается целиком (точечный отчёт должен быть быстрым, обход API подзадач ему
-    не нужен). При None (обычный тик/полный отчёт) — поведение без изменений."""
+    не нужен). При None (обычный тик/полный отчёт) — поведение без изменений.
+
+    overview_on_empty (§5, «Отчёт по запросу всегда с содержимым» — владелец: «если
+    человек нажал что нужен дайджест — значит надо дайджест»): все report-пути (кнопки
+    m:report:*, /report, force_report.py) включают этот флаг. Карточка без НОВЫХ изменений
+    (`not delta.has_changes`) в этом режиме не сворачивается в короткую «изменений нет» —
+    вместо неё collect_card_overview собирает последние комментарии НЕЗАВИСИМО от курсора
+    и LLM пишет сводку текущего состояния (report_no_new-нотис с датой). Если и обзору
+    нечего показать (0 комментариев за всё время) — карточка всё равно получает
+    информативную строку (report_empty/never текст), а не безликое «изменений нет».
+    Ежедневный тик (`overview_on_empty=False`, дефолт) не меняется — молчание при полностью
+    пустом чате остаётся фичей (§7 п.5)."""
     errors: list[str] = []
     local_date = now_utc.astimezone(safe_zoneinfo(chat.timezone, _chat_label(chat))).date()
     lang = chat.digest_language
@@ -145,23 +172,47 @@ async def process_chat(
     for card in cards:
         try:
             cursor = await repo.get_cursor(deps.pool, card.bitrix_task_id, chat.id)
-            deltas.append((card, await collector.collect_card_delta(deps.bx, card, cursor)))
+            delta = await collector.collect_card_delta(deps.bx, card, cursor)
+            deltas.append((card, delta, cursor))
         except Exception as e:
             log.exception("сбор дельты %s/%s", chat.id, card.bitrix_task_id)
             errors.append(f"{_chat_label(chat)}: карточка #{card.bitrix_task_id}: {e}")
 
+    # report_no_new/report_empty тексты (с датой last_posted_at чата) считаем один раз —
+    # они одинаковы для всех «пустых» карточек этого прогона (§5).
+    if overview_on_empty:
+        date_label = format_last_posted_at(chat)
+        if date_label is not None:
+            report_no_new_text = t(deps.locales, lang, "report_no_new", date=date_label)
+            report_empty_text = t(deps.locales, lang, "report_empty", date=date_label)
+        else:
+            report_no_new_text = t(deps.locales, lang, "report_no_new_never")
+            report_empty_text = t(deps.locales, lang, "report_empty_never")
+
     posted = False
-    if any(d.has_changes for _, d in deltas):  # §7 п.5: полностью пустой чат молчит
+    # §7 п.5: полностью пустой ЧАТ молчит на тике; на report-путях (owner: «раз нажал —
+    # значит нужен дайджест») хотя бы одна карточка в scope достаточна, чтобы что-то ответить.
+    if any(d.has_changes for _, d, _ in deltas) or (overview_on_empty and deltas):
         # Фаза 1: рендер блоков карточек — per-card try/except как раньше, сбой одной
         # карточки изолирован (её блок выпадает, попадает в errors, остальные едут дальше
         # в общем сообщении чата, §7 п.6 fallback-путь не затронут).
         blocks: list[tuple[llm.CardDelta, str]] = []
-        for card, delta in deltas:
+        for card, delta, cursor in deltas:
             try:
                 url = links.task_url(deps.settings.bitrix_webhook_url,
                                      deps.bx.webhook_user_id, delta.task_id)
                 if not delta.has_changes:
-                    text = render.no_changes_line(delta.alias, url, deps.locales, lang)
+                    if overview_on_empty:
+                        overview = await collector.collect_card_overview(deps.bx, card, cursor)
+                        if overview.has_changes:  # есть хоть что-то — сводка вместо тишины
+                            summary = await _summarize_overview_or_none(
+                                deps, overview, lang, str(local_date), errors, chat)
+                            text = render.overview_message(overview, summary, url, deps.locales,
+                                                           lang, report_no_new_text)
+                        else:  # 0 комментариев за всё время — обзору не из чего собираться
+                            text = render.report_empty_card_line(delta.alias, url, report_empty_text)
+                    else:
+                        text = render.no_changes_line(delta.alias, url, deps.locales, lang)
                 else:
                     summary = await _summarize_or_none(deps, delta, lang, str(local_date), errors, chat)
                     text = render.card_message(delta, summary, url, deps.locales, lang)
@@ -241,6 +292,24 @@ async def _summarize_or_none(deps, delta, lang, date_str, errors, chat) -> str |
     except (KeyError, ValueError, IndexError) as e:
         errors.append(f"{_chat_label(chat)}: некорректный шаблон промпта (#{delta.task_id}): {e}")
         return None  # render уйдёт в fallback (§7 п.6)
+
+
+async def _summarize_overview_or_none(deps, overview, lang, date_str, errors, chat) -> str | None:
+    """Аналог _summarize_or_none для сводки текущего состояния (§5, overview_on_empty):
+    отдельная функция, а не параметризация общей — разные шаблон/prompt-билдер, тот же
+    паттерн отказоустойчивости (LLM недоступен/битый промпт -> None, render уйдёт в
+    сырой fallback-список последних комментариев)."""
+    try:
+        prompt = llm.build_overview_prompt(deps.overview_template, overview, lang, date_str)
+        return await llm.summarize(deps.llm_client, deps.settings.openai_model, prompt)
+    except llm.LlmUnavailable as e:
+        errors.append(f"{_chat_label(chat)}: LLM недоступен для сводки (#{overview.task_id}): {e}")
+        return None
+    except (KeyError, ValueError, IndexError) as e:
+        errors.append(
+            f"{_chat_label(chat)}: некорректный шаблон промпта overview (#{overview.task_id}): {e}"
+        )
+        return None
 
 
 async def tick(deps: Deps, now_utc: dt.datetime | None = None) -> None:

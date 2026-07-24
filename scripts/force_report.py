@@ -41,6 +41,7 @@ async def main(task_id: int, rewind: int) -> None:
             locales=load_locales(),
             settings=s,
             prompt_template=llm_mod.load_prompt(),
+            overview_template=llm_mod.load_prompt("prompts/overview.txt"),
         )
         if s.dry_run:
             deps.send_fn = dry_run_send
@@ -75,7 +76,11 @@ async def main(task_id: int, rewind: int) -> None:
             # only_task_id=task_id (§5, выбор карточки для отчёта): скрипт форсирует
             # отчёт ИМЕННО по этой карточке, а не по всему чату — иначе в форс-отчёт
             # заодно попадали бы изменения других карточек того же топика.
-            errors, posted = await process_chat(deps, chat, now, mark_run=False, only_task_id=task_id)
+            # overview_on_empty=True (§5, «Отчёт по запросу всегда с содержимым») — форс-отчёт
+            # это явный запрос, пустая дельта не повод молчать, как и у /report.
+            errors, posted = await process_chat(
+                deps, chat, now, mark_run=False, only_task_id=task_id, overview_on_empty=True,
+            )
             if not posted:
                 await deps.send_fn(
                     deps.bot, chat.telegram_chat_id, chat.message_thread_id,

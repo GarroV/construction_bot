@@ -53,6 +53,40 @@ def test_build_prompt_omits_attachment_marker_when_no_files():
     assert "Плитку согласовали [вложения" not in prompt
 
 
+# --- build_overview_prompt: сводка «текущее состояние» (§5, «Отчёт по запросу») ---
+
+OVERVIEW = CardDelta(
+    task_id=8017, alias="Бишкек 8", task_changes=[],
+    comments=[ChatMessage(id=1, author="Иван", text="Плитку положили", file_ids=[])],
+    checklist_done=3, checklist_total=10,
+    files=[FileLink(name="план.pdf", url="https://p/disk/1")],
+    new_history_id=20, new_message_id=200,
+)
+
+
+def test_build_overview_prompt_fills_placeholders():
+    template = llm.load_prompt("prompts/overview.txt")
+    prompt = llm.build_overview_prompt(template, OVERVIEW, language="ru", date_str="2026-07-24")
+
+    assert "Бишкек 8" in prompt and "3/10" in prompt
+    assert "Иван -> Плитку положили" in prompt
+    assert "2026-07-24" in prompt
+    assert "{" not in prompt  # все плейсхолдеры закрыты — в т.ч. отсутствующие task_changes/files
+
+
+def test_build_overview_prompt_no_comments_uses_placeholder_dash():
+    template = llm.load_prompt("prompts/overview.txt")
+    empty = CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[], comments=[],
+        checklist_done=0, checklist_total=0, files=[],
+        new_history_id=0, new_message_id=0,
+    )
+
+    prompt = llm.build_overview_prompt(template, empty, language="ru", date_str="2026-07-24")
+
+    assert "Последние комментарии" in prompt
+
+
 def _client_returning(text):
     resp = AsyncMock()
     resp.choices = [AsyncMock(message=AsyncMock(content=text))]

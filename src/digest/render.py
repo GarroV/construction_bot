@@ -58,9 +58,29 @@ def _linkify_mentioned_files(escaped_summary: str, files, summary: str) -> str:
     return pattern.sub(lambda m: anchors[m.group(0)], escaped_summary)
 
 
+def _card_header(alias: str, task_url: str) -> str:
+    return f'🏗 <b><a href="{html.escape(task_url, quote=True)}">{html.escape(alias)}</a></b>'
+
+
+def _files_footer(files, summary: str | None) -> list[str]:
+    """📎-блок внизу карточки: файл добавляется, если LLM не упомянула его имя дословно в
+    тексте выжимки — либо выжимки вообще нет (fallback, там имена никогда не считаются
+    «упомянутыми» — footer-ссылка нужна всем файлам с url). Общий код card_message и
+    overview_message (§5, «Отчёт по запросу») — та же страховка от молчаливой потери файла."""
+    lines: list[str] = []
+    for f in files:
+        name = html.escape(f.name)
+        mentioned = summary is not None and f.name in summary
+        if f.url:
+            if not mentioned:  # иначе уже заинлайнена в тексте выжимки — дубль не нужен
+                lines.append(f'📎 <a href="{html.escape(f.url, quote=True)}">{name}</a>')
+        elif not mentioned:
+            lines.append(f"📎 {name}")
+    return lines
+
+
 def card_message(delta: CardDelta, summary: str | None, task_url: str, locales, lang: str) -> str:
-    header = f'🏗 <b><a href="{html.escape(task_url, quote=True)}">{html.escape(delta.alias)}</a></b>'
-    lines = [header, _checklist_line(delta, locales, lang)]
+    lines = [_card_header(delta.alias, task_url), _checklist_line(delta, locales, lang)]
     if summary is not None:
         escaped_summary = html.escape(summary.strip())
         escaped_summary = _linkify_mentioned_files(escaped_summary, delta.files, summary)
@@ -69,25 +89,41 @@ def card_message(delta: CardDelta, summary: str | None, task_url: str, locales, 
         lines.append(t(locales, lang, "fallback_notice"))
         lines += [html.escape(ln) for ln in delta.task_changes]
         lines += [f"{html.escape(m.author)}: {html.escape(m.text[:200])}" for m in delta.comments]
-    for f in delta.files:
-        name = html.escape(f.name)
-        # Страховка от молчаливой потери (§7): файл добавляем в 📎-блок, если LLM не
-        # упомянула его имя дословно в тексте выжимки — либо выжимки вообще нет (fallback,
-        # там имена никогда не считаются «упомянутыми» — footer-ссылка нужна всем файлам
-        # с url). `f.name not in summary` — по сырому (неэкранированному) summary: LLM
-        # инструктирована упоминать имена дословно.
-        mentioned = summary is not None and f.name in summary
-        if f.url:
-            if not mentioned:  # иначе уже заинлайнена в тексте выжимки — дубль не нужен
-                lines.append(f'📎 <a href="{html.escape(f.url, quote=True)}">{name}</a>')
-        elif not mentioned:
-            lines.append(f"📎 {name}")
+    lines += _files_footer(delta.files, summary)
     return clip("\n".join(lines))
 
 
 def no_changes_line(alias: str, task_url: str, locales, lang: str) -> str:
-    return (f'🏗 <b><a href="{html.escape(task_url, quote=True)}">{html.escape(alias)}</a></b> — '
-            f"{t(locales, lang, 'no_changes')}")
+    return report_empty_card_line(alias, task_url, t(locales, lang, "no_changes"))
+
+
+def report_empty_card_line(alias: str, task_url: str, trailing_text: str) -> str:
+    """Шапка карточки (alias+ссылка) + произвольный «пусто» текст (§5, «Отчёт по запросу
+    всегда с содержимым»): используется и для обычного no_changes_line (тик), и для
+    карточки без ЛЮБОГО материала даже в overview-режиме (0 комментариев за всё время —
+    сводку строить не из чего, переиспользуем report_empty/report_empty_never текст,
+    чтобы дать ту же информативность — дату последнего дайджеста), см. process_chat."""
+    return f'{_card_header(alias, task_url)} — {trailing_text}'
+
+
+def overview_message(
+    overview: CardDelta, summary: str | None, task_url: str, locales, lang: str, notice: str,
+) -> str:
+    """Блок «текущее состояние» (§5, «Отчёт по запросу всегда с содержимым»): та же
+    вёрстка, что у card_message (шапка, строка чек-листа, LLM-сводка/fallback, 📎-футер),
+    плюс системная строка `notice` (report_no_new/report_no_new_never, с датой) перед
+    строкой чек-листа — явно поясняет партнёру, что это не новые изменения, а срез
+    текущего состояния по его запросу."""
+    lines = [_card_header(overview.alias, task_url), notice, _checklist_line(overview, locales, lang)]
+    if summary is not None:
+        escaped_summary = html.escape(summary.strip())
+        escaped_summary = _linkify_mentioned_files(escaped_summary, overview.files, summary)
+        lines.append(escaped_summary)
+    else:  # LLM недоступен — тот же fallback-паттерн, что у card_message (§7 п.6)
+        lines.append(t(locales, lang, "fallback_notice"))
+        lines += [f"{html.escape(m.author)}: {html.escape(m.text[:200])}" for m in overview.comments]
+    lines += _files_footer(overview.files, summary)
+    return clip("\n".join(lines))
 
 
 def clip(text: str, limit: int = MESSAGE_LIMIT) -> str:
