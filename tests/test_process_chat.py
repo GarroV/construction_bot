@@ -455,8 +455,10 @@ async def test_tick_isolates_chat_errors_and_reports_admin(monkeypatch):
     assert "ошибк" in args[3].lower()
 
 
-async def test_tick_isolates_invalid_timezone_and_continues(monkeypatch):
-    """Невалидная timezone одного чата не должна глушить весь tick (§ фикс №2)."""
+async def test_tick_falls_back_to_utc_for_invalid_timezone_and_continues(monkeypatch, caplog):
+    """Ревью (safe_zoneinfo): невалидная timezone одного чата больше не абортит его
+    обработку исключением ZoneInfoNotFoundError — is_digest_due деградирует на UTC и
+    чат едет наравне с остальными; сигнал не теряется — есть warning в логе."""
     chat1 = make_chat(id=1, telegram_chat_id=-100, timezone="Invalid/Zone")
     chat2 = make_chat(id=2, telegram_chat_id=-200, country="Казахстан")
     monkeypatch.setattr(scheduler.repo, "list_active_chats", AsyncMock(return_value=[chat1, chat2]))
@@ -467,16 +469,15 @@ async def test_tick_isolates_invalid_timezone_and_continues(monkeypatch):
     send_fn = AsyncMock(return_value=SendResult(ok=True))
     deps = make_deps(send_fn, admin_chat_id=42)
 
-    now = dt.datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
-    await scheduler.tick(deps, now)  # не должен упасть на невалидной tz первого чата
+    now = dt.datetime(2026, 7, 21, 10, 0, tzinfo=UTC)  # 10:00 UTC >= digest_time 09:00 (по UTC-фолбэку)
+    with caplog.at_level("WARNING", logger="src.digest.scheduler"):
+        await scheduler.tick(deps, now)  # не должен упасть на невалидной tz первого чата
 
-    process_chat_mock.assert_awaited_once()
-    assert process_chat_mock.await_args.args[1].id == chat2.id  # второй чат всё же обработан
+    processed_ids = {call.args[1].id for call in process_chat_mock.await_args_list}
+    assert processed_ids == {chat1.id, chat2.id}  # оба чата обработаны — сбой tz не абортит прогон
 
-    send_fn.assert_awaited_once()
-    args = send_fn.await_args.args
-    assert args[1] == 42
-    assert "кыргызстан" in args[3].lower()  # ошибка первого чата (default country) попала в admin-сводку
+    send_fn.assert_not_awaited()  # process_chat не вернул ошибок — admin-сводка не нужна
+    assert any("Invalid/Zone" in r.message for r in caplog.records)  # сигнал не потерян
 
 
 async def test_admin_summary_escapes_html(monkeypatch):

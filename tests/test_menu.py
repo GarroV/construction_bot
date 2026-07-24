@@ -30,7 +30,7 @@ def make_deps(**over):
 
 CHAT = SimpleNamespace(
     id=1, telegram_chat_id=-100, message_thread_id=7, digest_language="ru",
-    timezone="UTC", last_posted_at=None,
+    timezone="UTC", last_posted_at=None, country=None,
 )
 
 CARDS = [
@@ -330,7 +330,7 @@ async def test_report_empty_includes_formatted_date_in_chat_timezone(monkeypatch
     формат «ДД.ММ ЧЧ:ММ»."""
     chat = SimpleNamespace(
         id=1, telegram_chat_id=-100, message_thread_id=7, digest_language="ru",
-        timezone="Europe/Belgrade",
+        timezone="Europe/Belgrade", country=None,
         last_posted_at=dt.datetime(2026, 7, 20, 12, 30, tzinfo=UTC),  # UTC+2 летом -> 14:30
     )
     deps = make_deps()
@@ -346,7 +346,7 @@ async def test_report_empty_never_branch_when_last_posted_at_is_none(monkeypatch
     """last_posted_at IS NULL (чат только подключили) -> отдельный текст без даты."""
     chat = SimpleNamespace(
         id=1, telegram_chat_id=-100, message_thread_id=7, digest_language="ru",
-        timezone="UTC", last_posted_at=None,
+        timezone="UTC", last_posted_at=None, country=None,
     )
     deps = make_deps()
     monkeypatch.setattr(menu, "process_chat", AsyncMock(return_value=([], False)))
@@ -355,6 +355,24 @@ async def test_report_empty_never_branch_when_last_posted_at_is_none(monkeypatch
 
     text = deps.send_fn.await_args.args[3]
     assert text == t(LOCALES, "ru", "report_empty_never")
+
+
+async def test_report_empty_falls_back_to_utc_for_invalid_chat_timezone(monkeypatch):
+    """Ревью (safe_zoneinfo): битая timezone чата в БД (ручная правка, легальный
+    сценарий §6) не должна ронять /report ZoneInfoNotFoundError — вместо этого
+    отчёт уходит с датой по UTC."""
+    chat = SimpleNamespace(
+        id=1, telegram_chat_id=-100, message_thread_id=7, digest_language="ru",
+        timezone="Not/AZone", country=None,
+        last_posted_at=dt.datetime(2026, 7, 20, 12, 30, tzinfo=UTC),
+    )
+    deps = make_deps()
+    monkeypatch.setattr(menu, "process_chat", AsyncMock(return_value=([], False)))
+
+    await menu.run_report(deps, chat)  # не должен поднять ZoneInfoNotFoundError
+
+    text = deps.send_fn.await_args.args[3]
+    assert text == t(LOCALES, "ru", "report_empty", date="20.07 12:30")  # UTC-фолбэк, без сдвига
 
 
 # --- send_report_pick: клавиатура «По чему отчёт?» ---

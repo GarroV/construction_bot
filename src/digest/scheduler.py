@@ -39,8 +39,22 @@ def _chat_label(chat: ChatRow) -> str:
     return str(chat.country or chat.telegram_chat_id)
 
 
+def safe_zoneinfo(tz: str, chat_label: str = "") -> ZoneInfo:
+    """ZoneInfo(tz) с fallback на UTC (ревью: битая таймзона чата в БД — легальный
+    сценарий §6, ручные правки/рассинхрон tz_aliases) не должна ронять ни тик, ни
+    интерактивные пути (/report, кнопки, force_report) исключением ZoneInfoNotFoundError.
+    Сигнал не глушим молча — логируем warning с исходным tz и лейблом чата, если он
+    известен вызывающему (иначе tick тихо переехавший на UTC чат было бы невозможно
+    отличить от корректно настроенного)."""
+    try:
+        return ZoneInfo(tz)
+    except Exception:
+        log.warning("невалидная таймзона %r у чата %s — fallback на UTC", tz, chat_label or "?")
+        return ZoneInfo("UTC")
+
+
 def is_digest_due(chat: ChatRow, now_utc: dt.datetime) -> bool:
-    local = now_utc.astimezone(ZoneInfo(chat.timezone))
+    local = now_utc.astimezone(safe_zoneinfo(chat.timezone, _chat_label(chat)))
     if local.time() < chat.digest_time:
         return False
     return chat.last_digest_date is None or chat.last_digest_date < local.date()
@@ -113,7 +127,7 @@ async def process_chat(
     пропускается целиком (точечный отчёт должен быть быстрым, обход API подзадач ему
     не нужен). При None (обычный тик/полный отчёт) — поведение без изменений."""
     errors: list[str] = []
-    local_date = now_utc.astimezone(ZoneInfo(chat.timezone)).date()
+    local_date = now_utc.astimezone(safe_zoneinfo(chat.timezone, _chat_label(chat))).date()
     lang = chat.digest_language
     cards = await repo.list_active_cards(deps.pool, chat.id)
     if only_task_id is None:

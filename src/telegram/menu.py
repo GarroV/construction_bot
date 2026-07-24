@@ -36,7 +36,6 @@ send_rm_keyboard отсюда только внутри build_router() (лока
 """
 import datetime as dt
 import logging
-from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -48,7 +47,7 @@ from aiogram.types import (
 )
 
 from src import repo
-from src.digest.scheduler import process_chat
+from src.digest.scheduler import _chat_label, process_chat, safe_zoneinfo
 from src.i18n import t
 from src.repo import CardRow, ChatRow
 from src.telegram.commands import (
@@ -173,7 +172,7 @@ def _report_empty_text(deps, chat: ChatRow) -> str:
     lang = chat.digest_language
     if chat.last_posted_at is None:
         return t(deps.locales, lang, "report_empty_never")
-    local = chat.last_posted_at.astimezone(ZoneInfo(chat.timezone))
+    local = chat.last_posted_at.astimezone(safe_zoneinfo(chat.timezone, _chat_label(chat)))
     return t(deps.locales, lang, "report_empty", date=local.strftime(_REPORT_EMPTY_DATE_FMT))
 
 

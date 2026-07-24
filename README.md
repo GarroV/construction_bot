@@ -161,6 +161,12 @@ TEST_POSTGRES_DSN=postgresql://bot:bot@<host>:5544/botdb .venv/bin/pytest -v
 - **Ручной сброс дайджеста для теста** — если нужно прогнать дайджест повторно в тот же
   календарный день, не дожидаясь следующих суток: `UPDATE chats SET last_digest_date = NULL WHERE
   id = <chat_id>;`.
+- **Битая `chats.timezone` не глушит бота.** `chats.timezone` пишется только через `/time`
+  (валидируется `resolve_tz`), но ручная правка в БД — легальный сценарий (как у `restricted`
+  выше) и теоретически может занести невалидное значение. `src/digest/scheduler.safe_zoneinfo`
+  оборачивает каждое обращение к `chats.timezone` (тик, `/report`/кнопки, `force_report.py`):
+  невалидная таймзона не роняет прогон исключением `ZoneInfoNotFoundError`, а деградирует на UTC
+  с `WARNING` в лог (сигнал не теряется молча).
 
 ### Результаты смоук-теста
 
