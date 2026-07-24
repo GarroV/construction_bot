@@ -73,9 +73,15 @@ def patch_repo(monkeypatch, *, cards=None, cursor=CUR):
         advance_cursor=AsyncMock(),
         update_chat_telegram_id=AsyncMock(),
         deactivate_chat=AsyncMock(),
+        card_exists=AsyncMock(return_value=False),
+        add_card=AsyncMock(return_value="added"),
     )
     for name, mock in vars(mocks).items():
         monkeypatch.setattr(scheduler.repo, name, mock)
+    # Дискавери подзадач (§7 фича 1) по умолчанию no-op: ни одна из этих тестов discovery не
+    # проверяет, а без мока methods.list_subtasks ушёл бы в реальный bx.call и упал бы
+    # AttributeError на тестовом bx=SimpleNamespace(...), засоряя errors всех остальных тестов.
+    monkeypatch.setattr(scheduler.methods, "list_subtasks", AsyncMock(return_value=[]))
     return mocks
 
 
@@ -346,3 +352,97 @@ async def test_admin_summary_escapes_html(monkeypatch):
     text = send_fn.await_args.args[3]
     assert "&lt;тест&gt;" in text
     assert "<тест>" not in text
+
+
+# --- Авто-подхват подзадач (фича 1, §7): дискавери внутри process_chat до сбора дельты ---
+
+
+async def test_discovery_adds_new_subtask_card(monkeypatch):
+    """Новая подзадача (нет среди карточек чата вообще) -> add_card с alias
+    «Родитель / Подзадача» и auto_from=parent.bitrix_task_id."""
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])  # CARD — ручная (auto_from=None)
+    monkeypatch.setattr(scheduler.methods, "list_subtasks", AsyncMock(return_value=[
+        {"id": "73689", "title": "Подзадача", "status": "2"},
+    ]))
+    monkeypatch.setattr(scheduler.methods, "get_latest_history_id", AsyncMock(return_value=10))
+    monkeypatch.setattr(scheduler.methods, "get_latest_comment_id", AsyncMock(return_value=0))
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", AsyncMock(return_value=DELTA_EMPTY))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    repo_mocks.card_exists.assert_awaited_once_with(deps.pool, chat.id, 73689)
+    repo_mocks.add_card.assert_awaited_once_with(
+        deps.pool, chat.id, 73689, "Бишкек 8 / Подзадача", None, 10, 0, 0, auto_from=8017,
+    )
+
+
+async def test_discovery_skips_subtask_existing_active_or_inactive(monkeypatch):
+    """Подзадача уже среди карточек чата (активная ИЛИ деактивированная) -> add_card НЕ
+    вызывается — деактивированную реанимировать нельзя, партнёр мог снять её осознанно."""
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    repo_mocks.card_exists.return_value = True
+    monkeypatch.setattr(scheduler.methods, "list_subtasks", AsyncMock(return_value=[
+        {"id": "73689", "title": "Подзадача", "status": "2"},
+    ]))
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", AsyncMock(return_value=DELTA_EMPTY))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    repo_mocks.add_card.assert_not_awaited()
+
+
+async def test_discovery_error_is_isolated_and_run_continues(monkeypatch):
+    """Сбой list_subtasks по одному родителю -> попадает в errors, но прогон чата
+    доходит до конца (mark_digest_run всё равно вызван) — как у сбора дельты."""
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.methods, "list_subtasks",
+                        AsyncMock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", AsyncMock(return_value=DELTA_EMPTY))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert errors
+    assert any("подзадач" in e for e in errors)
+    repo_mocks.mark_digest_run.assert_awaited_once()
+    repo_mocks.add_card.assert_not_awaited()
+
+
+async def test_discovery_skips_auto_cards_as_roots():
+    """Один уровень вложенности: карточка САМА авто-подхваченная (auto_from не None) не
+    участвует в дискавери как родитель — иначе подзадачи подзадач дискаверились бы рекурсивно."""
+    auto_card = CardRow(
+        id=3, bitrix_task_id=73689, chat_id=1, alias="Бишкек 8 / Подзадача",
+        active=True, auto_from=8017,
+    )
+    errors = await scheduler._discover_subtasks(
+        make_deps(AsyncMock()), make_chat(), [auto_card]
+    )
+    assert errors == []
+
+
+async def test_discovery_calls_list_subtasks_only_for_manual_cards(monkeypatch):
+    chat = make_chat()
+    auto_card = CardRow(
+        id=3, bitrix_task_id=73689, chat_id=1, alias="Бишкек 8 / Подзадача",
+        active=True, auto_from=8017,
+    )
+    repo_mocks = patch_repo(monkeypatch, cards=[auto_card])
+    list_subtasks_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(scheduler.methods, "list_subtasks", list_subtasks_mock)
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", AsyncMock(return_value=DELTA_EMPTY))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    list_subtasks_mock.assert_not_awaited()
+    repo_mocks.add_card.assert_not_awaited()

@@ -116,7 +116,11 @@ async def handle_list(deps, chat) -> str:
     if not cards:
         return t(deps.locales, lang, "list_empty")
     lines = [t(deps.locales, lang, "list_header")]
-    lines += [f"• {c.alias or '#'} (#{c.bitrix_task_id})" for c in cards]
+    # «↳» — авто-подхваченная подзадача (auto_from не None, §7 фича 1), «•» — ручная /add.
+    lines += [
+        f"{'↳' if c.auto_from is not None else '•'} {c.alias or '#'} (#{c.bitrix_task_id})"
+        for c in cards
+    ]
     return "\n".join(lines)
 
 

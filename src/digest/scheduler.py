@@ -6,11 +6,11 @@ from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 from src import repo
-from src.bitrix import links
-from src.bitrix.client import BitrixClient
+from src.bitrix import links, methods
+from src.bitrix.client import BitrixClient, BitrixError
 from src.digest import collector, llm, render
 from src.i18n import t
-from src.repo import ChatRow
+from src.repo import CardRow, ChatRow
 from src.telegram.send import SendResult, send_html
 
 log = logging.getLogger(__name__)
@@ -53,6 +53,51 @@ def is_ping_due(chat: ChatRow, now_utc: dt.datetime, ping_days: int, has_active_
     return (now_utc - anchor) >= dt.timedelta(days=ping_days)
 
 
+async def _add_subtask_card(deps: Deps, chat: ChatRow, parent: CardRow, sub_id: int, sub_title: str) -> None:
+    """Заводит авто-подхваченную карточку подзадачи с курсорами «с этого момента» (§5,
+    как обычный /add) — первый прогон по ней не должен вываливать историю задачи."""
+    last_history_id = await methods.get_latest_history_id(deps.bx, sub_id)
+    # На этом портале у задач нет чатов (живой смоук §13: 42103 без chatId) — не спрашиваем
+    # chatId подзадачи отдельным вызовом ради last_message_id, дискавери не должен дорожать
+    # лишним обращением к API; фиксируем 0, как для карточек без чата в handle_add.
+    last_message_id = 0
+    try:
+        last_comment_id = await methods.get_latest_comment_id(deps.bx, sub_id)
+    except BitrixError as e:
+        log.warning("get_latest_comment_id(%s) не удался при дискавери: %s", sub_id, e)
+        last_comment_id = 0
+    alias = f"{parent.alias or f'#{parent.bitrix_task_id}'} / {sub_title}"
+    await repo.add_card(
+        deps.pool, chat.id, sub_id, alias, None,
+        last_history_id, last_message_id, last_comment_id, auto_from=parent.bitrix_task_id,
+    )
+
+
+async def _discover_subtasks(deps: Deps, chat: ChatRow, cards: list[CardRow]) -> list[str]:
+    """Авто-подхват подзадач Битрикса (§7 фича 1): для каждой РУЧНОЙ активной карточки чата
+    (auto_from IS NULL — авто-карточки сами родителями не становятся, иначе подзадачи подзадач
+    дискаверились бы рекурсивно; уровень вложенности ровно один) ищем её подзадачи через
+    tasks.task.list(PARENT_ID) и заводим карточку на каждую, которой ещё нет среди карточек
+    этого чата — ни активной, ни деактивированной (партнёр мог снять её осознанно, реанимировать
+    нельзя). Сбой по одному родителю логируется и попадает в errors, но не роняет прогон —
+    тот же паттерн изоляции, что у сбора дельты чуть ниже."""
+    errors: list[str] = []
+    for card in cards:
+        if card.auto_from is not None:
+            continue
+        try:
+            subtasks = await methods.list_subtasks(deps.bx, card.bitrix_task_id)
+            for sub in subtasks:
+                sub_id = int(sub["id"])
+                if await repo.card_exists(deps.pool, chat.id, sub_id):
+                    continue
+                await _add_subtask_card(deps, chat, card, sub_id, str(sub.get("title") or f"#{sub_id}"))
+        except Exception as e:
+            log.exception("дискавери подзадач %s/%s", chat.id, card.bitrix_task_id)
+            errors.append(f"{_chat_label(chat)}: дискавери подзадач #{card.bitrix_task_id}: {e}")
+    return errors
+
+
 async def process_chat(
     deps: Deps, chat: ChatRow, now_utc: dt.datetime, mark_run: bool = True
 ) -> tuple[list[str], bool]:
@@ -64,6 +109,7 @@ async def process_chat(
     local_date = now_utc.astimezone(ZoneInfo(chat.timezone)).date()
     lang = chat.digest_language
     cards = await repo.list_active_cards(deps.pool, chat.id)
+    errors += await _discover_subtasks(deps, chat, cards)
 
     deltas = []
     for card in cards:

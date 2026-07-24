@@ -49,6 +49,73 @@ async def test_add_card_lifecycle(pool):
     assert (cur.last_history_id, cur.last_message_id, cur.last_comment_id) == (150, 250, 350)
 
 
+async def test_add_card_manual_has_null_auto_from(pool):
+    """Обычный /add (без auto_from) заводит РУЧНУЮ карточку — auto_from IS NULL."""
+    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+
+    await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 100, 200, 300)
+
+    cards = await repo.list_active_cards(pool, chat.id)
+    assert len(cards) == 1
+    assert cards[0].auto_from is None
+
+
+async def test_add_card_with_auto_from_records_parent_task_id(pool):
+    """Дискавери подзадач (фича 1): auto_from хранит bitrix_task_id родителя, от которого
+    карточка была авто-подхвачена."""
+    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    await repo.add_card(pool, chat.id, 42103, "Белград 2", 555, 0, 0, 0)
+
+    outcome = await repo.add_card(
+        pool, chat.id, 73689, "Белград 2 / Подзадача", None, 10, 0, 0, auto_from=42103
+    )
+
+    assert outcome == "added"
+    cards = await repo.list_active_cards(pool, chat.id)
+    sub = next(c for c in cards if c.bitrix_task_id == 73689)
+    assert sub.auto_from == 42103
+
+
+async def test_deactivate_manual_card_cascades_to_auto_children(pool):
+    """§ фича 1: снятие РУЧНОЙ карточки деактивирует и её авто-подхваченных детей (детей
+    ДРУГИХ родителей и детей в других чатах не трогает)."""
+    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    other_chat = await repo.upsert_chat(pool, -200, 7, "Казахстан", "ru")
+    await repo.add_card(pool, chat.id, 42103, "Белград 2", 555, 0, 0, 0)
+    await repo.add_card(pool, chat.id, 73689, "Белград 2 / Подзадача 1", None, 0, 0, 0, auto_from=42103)
+    await repo.add_card(pool, chat.id, 73690, "Белград 2 / Подзадача 2", None, 0, 0, 0, auto_from=42103)
+    await repo.add_card(pool, chat.id, 99999, "Не родня", 555, 0, 0, 0)  # другой родитель
+    await repo.add_card(pool, other_chat.id, 73689, "Белград 2 / Подзадача 1", None, 0, 0, 0, auto_from=42103)
+
+    removed = await repo.deactivate_card(pool, chat.id, 42103)
+
+    assert removed is True
+    remaining_ids = {c.bitrix_task_id for c in await repo.list_active_cards(pool, chat.id)}
+    assert remaining_ids == {99999}
+    # другой чат с той же (task_id, auto_from) не затронут
+    other_ids = {c.bitrix_task_id for c in await repo.list_active_cards(pool, other_chat.id)}
+    assert other_ids == {73689}
+
+
+async def test_deactivate_card_no_match_returns_false(pool):
+    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+
+    assert await repo.deactivate_card(pool, chat.id, 12345) is False
+
+
+async def test_card_exists_true_for_active_and_inactive(pool):
+    """Дискавери не должно реанимировать снятую партнёром вручную карточку — нужен способ
+    проверить существование связки НЕЗАВИСИМО от active."""
+    chat = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    await repo.add_card(pool, chat.id, 8017, "Бишкек 8", 555, 0, 0, 0)
+    await repo.add_card(pool, chat.id, 8018, "Бишкек 9", 555, 0, 0, 0)
+    await repo.deactivate_card(pool, chat.id, 8018)
+
+    assert await repo.card_exists(pool, chat.id, 8017) is True   # активная
+    assert await repo.card_exists(pool, chat.id, 8018) is True   # деактивированная — тоже "существует"
+    assert await repo.card_exists(pool, chat.id, 424242) is False
+
+
 async def test_last_comment_id_column_defaults_to_zero(pool):
     """Миграция 0002: ALTER TABLE ... ADD COLUMN last_comment_id BIGINT NOT NULL DEFAULT 0 —
     прямая проверка через INSERT без указания last_comment_id (как были бы строки, заведённые

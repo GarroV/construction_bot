@@ -123,6 +123,22 @@ async def test_remove_and_list(monkeypatch):
     assert "Бишкек 8" in listing and "8017" in listing
 
 
+async def test_list_marks_auto_discovered_cards_with_hook(monkeypatch):
+    """Фича 1 (§5): авто-подхваченная подзадача (auto_from не None) помечается «↳»
+    перед alias в /list, ручная — обычным маркером «•»."""
+    deps = make_deps()
+    monkeypatch.setattr(commands.repo, "list_active_cards", AsyncMock(return_value=[
+        CardRow(id=1, bitrix_task_id=8017, chat_id=1, alias="Бишкек 8", active=True),
+        CardRow(id=2, bitrix_task_id=73689, chat_id=1, alias="Бишкек 8 / Подзадача",
+                active=True, auto_from=8017),
+    ]))
+
+    listing = await commands.handle_list(deps, CHAT)
+
+    assert "• Бишкек 8 (#8017)" in listing
+    assert "↳ Бишкек 8 / Подзадача (#73689)" in listing
+
+
 async def test_time_validation(monkeypatch):
     deps = make_deps()
     set_time = AsyncMock()

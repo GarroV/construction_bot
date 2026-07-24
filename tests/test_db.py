@@ -22,7 +22,7 @@ async def test_migrations_apply_and_are_idempotent(pool):
     applied_first = await apply_migrations(pool)
     applied_second = await apply_migrations(pool)
 
-    assert applied_first == ["0001_init.sql", "0002_last_comment_id.sql"]
+    assert applied_first == ["0001_init.sql", "0002_last_comment_id.sql", "0003_auto_from.sql"]
     assert applied_second == []  # повторный прогон ничего не применяет
     tables = {
         r["tablename"]

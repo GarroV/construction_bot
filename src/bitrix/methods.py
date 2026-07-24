@@ -159,6 +159,17 @@ async def get_latest_chat_message_id(bx: BitrixClient, chat_id: int | None) -> i
     return max((int(m["id"]) for m in res.get("messages", [])), default=0)
 
 
+async def list_subtasks(bx: BitrixClient, parent_id: int) -> list[dict]:
+    """Подзадачи Битрикса для авто-подхвата (§7 фича 1): tasks.task.list с filter PARENT_ID
+    (scope task, работает — проверено живьём: у 42103 подзадача 73689). Пагинацию не городим —
+    подзадач на карточке единицы, не десятки."""
+    res = await bx.call(
+        "tasks.task.list",
+        {"filter": {"PARENT_ID": parent_id}, "select": ["ID", "TITLE", "STATUS"]},
+    )
+    return res.get("tasks", []) if isinstance(res, dict) else (res or [])
+
+
 def _merge_users(acc: dict, users) -> dict:
     if isinstance(users, dict):
         return {**acc, **users}

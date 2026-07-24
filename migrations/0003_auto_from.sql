@@ -1,0 +1,1 @@
+ALTER TABLE cards ADD COLUMN auto_from BIGINT;

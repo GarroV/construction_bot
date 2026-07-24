@@ -2,7 +2,13 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import httpx
+import respx
+
 from src.bitrix import methods
+from src.bitrix.client import BitrixClient
+
+BASE = "https://portal.bitrix24.ru/rest/123/abc/"
 
 _LIVE_CHECKLIST = json.loads(
     Path("tests/fixtures/live/checklist.json").read_text()
@@ -107,3 +113,33 @@ async def test_checklist_summary_on_live_fixture():
     assert summary.has_stages is True
     assert summary.stage_title is None
     assert (summary.done, summary.total) == (65, 71)
+
+
+# --- Авто-подхват подзадач (фича 1, §7): list_subtasks через tasks.task.list PARENT_ID ---
+
+
+@respx.mock
+async def test_list_subtasks_returns_id_title_status_for_parent():
+    route = respx.get(BASE + "tasks.task.list.json")
+    route.respond(json={"result": {"tasks": [
+        {"id": "73689", "title": "Подзадача", "status": "2"},
+    ]}})
+    async with httpx.AsyncClient() as http:
+        bx = BitrixClient(BASE, http, min_interval=0)
+
+        subtasks = await methods.list_subtasks(bx, 42103)
+
+    assert subtasks == [{"id": "73689", "title": "Подзадача", "status": "2"}]
+    q = route.calls[0].request.url.params
+    assert q["filter[PARENT_ID]"] == "42103"
+
+
+@respx.mock
+async def test_list_subtasks_empty_when_no_children():
+    respx.get(BASE + "tasks.task.list.json").respond(json={"result": {"tasks": []}})
+    async with httpx.AsyncClient() as http:
+        bx = BitrixClient(BASE, http, min_interval=0)
+
+        subtasks = await methods.list_subtasks(bx, 8017)
+
+    assert subtasks == []

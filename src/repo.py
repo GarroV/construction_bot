@@ -33,6 +33,7 @@ class CardRow:
     chat_id: int
     alias: str | None
     active: bool
+    auto_from: int | None = None  # NULL = добавлена вручную; иначе bitrix_task_id родителя (§7 фича 1)
 
 
 @dataclass(frozen=True)
@@ -94,13 +95,15 @@ async def deactivate_chat(pool, chat_id: int) -> None:
 async def add_card(
     pool, chat_id, bitrix_task_id, alias, added_by,
     last_history_id, last_message_id, last_comment_id,
+    auto_from: int | None = None,
 ) -> str:
     async with pool.acquire() as conn, conn.transaction():
         # Try to insert; if conflict, DO NOTHING returns None
         inserted = await conn.fetchrow(
-            "INSERT INTO cards (bitrix_task_id, chat_id, alias, added_by) VALUES ($1,$2,$3,$4) "
+            "INSERT INTO cards (bitrix_task_id, chat_id, alias, added_by, auto_from) "
+            "VALUES ($1,$2,$3,$4,$5) "
             "ON CONFLICT (bitrix_task_id, chat_id) DO NOTHING RETURNING id",
-            bitrix_task_id, chat_id, alias, added_by,
+            bitrix_task_id, chat_id, alias, added_by, auto_from,
         )
         if inserted:
             # New card was inserted
@@ -119,8 +122,14 @@ async def add_card(
         if existing["active"]:
             return "exists"
 
-        # Reactivate and reinitialize cursor
-        await conn.execute("UPDATE cards SET active = TRUE WHERE id = $1", existing["id"])
+        # Reactivate, reinitialize cursor and re-record auto_from (a manual /add on a
+        # previously auto-discovered-but-removed task turns it back into a manual card,
+        # since auto_from defaults to None here — discovery itself never reaches this
+        # branch, it pre-checks existence via card_exists and skips known task ids).
+        await conn.execute(
+            "UPDATE cards SET active = TRUE, auto_from = $2 WHERE id = $1",
+            existing["id"], auto_from,
+        )
         await conn.execute(
             "UPDATE cursors SET last_history_id=$3, last_message_id=$4, last_comment_id=$5, "
             "updated_at=now() WHERE bitrix_task_id=$1 AND chat_id=$2",
@@ -129,17 +138,36 @@ async def add_card(
         return "reactivated"
 
 
+def _rows_affected(status: str) -> int:
+    """asyncpg execute() возвращает строку вида "UPDATE N" — берём N. НЕ status.endswith("1")
+    (прежняя реализация): для N=10 это дало бы False при реально снятых строках."""
+    return int(status.rsplit(" ", 1)[-1])
+
+
 async def deactivate_card(pool, chat_id: int, bitrix_task_id: int) -> bool:
+    """Снимает карточку `bitrix_task_id` в чате; если она была РУЧНОЙ (или вообще
+    что-то совпало), заодно снимает её авто-подхваченных детей (`auto_from = bitrix_task_id`)
+    в этом же чате (§7 фича 1). True, если снята хотя бы одна строка."""
     status = await pool.execute(
-        "UPDATE cards SET active = FALSE WHERE chat_id = $1 AND bitrix_task_id = $2 AND active",
+        "UPDATE cards SET active = FALSE WHERE chat_id = $1 "
+        "AND (bitrix_task_id = $2 OR auto_from = $2) AND active",
         chat_id, bitrix_task_id,
     )
-    return status.endswith("1")
+    return _rows_affected(status) > 0
+
+
+async def card_exists(pool, chat_id: int, bitrix_task_id: int) -> bool:
+    """Существует ли связка (чат, задача) НЕЗАВИСИМО от active — дискавери подзадач (§7 фича 1)
+    не должен реанимировать карточку, которую партнёр снял осознанно вручную."""
+    row = await pool.fetchrow(
+        "SELECT 1 FROM cards WHERE chat_id = $1 AND bitrix_task_id = $2", chat_id, bitrix_task_id
+    )
+    return row is not None
 
 
 async def list_active_cards(pool, chat_id: int) -> list[CardRow]:
     rows = await pool.fetch(
-        "SELECT id, bitrix_task_id, chat_id, alias, active FROM cards "
+        "SELECT id, bitrix_task_id, chat_id, alias, active, auto_from FROM cards "
         "WHERE chat_id = $1 AND active ORDER BY id",
         chat_id,
     )
