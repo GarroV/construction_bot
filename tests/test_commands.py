@@ -181,6 +181,45 @@ async def test_ensure_chat_open_chat_skips_whitelist(monkeypatch):
     pool.fetch.assert_not_awaited()
 
 
+def _callback_obj(*, clicker_id: int, bot_id: int = 42):
+    """callback.message.from_user — БОТ (автор сообщения с инлайн-кнопкой), не
+    нажавшего; callback.from_user — реально нажавший пользователь. Ревью Critical:
+    ensure_chat_for_callback обязана проверять права по нажавшему, а не по автору
+    сообщения — иначе restricted-чат отваливается для любого админа (id бота никогда
+    не будет в вайтлисте чата)."""
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=-100, title="Кыргызстан"),
+        from_user=SimpleNamespace(id=bot_id),
+        is_topic_message=False,
+        message_thread_id=None,
+    )
+    return SimpleNamespace(message=message, from_user=SimpleNamespace(id=clicker_id))
+
+
+async def test_ensure_chat_for_callback_checks_clicker_not_bot_author(monkeypatch):
+    """Вайтлист содержит ТОЛЬКО нажавшего (777), не id бота (42). Со старым багом
+    (проверка callback.message.from_user) это бы отказало даже вайтлистнутому админу."""
+    pool = AsyncMock()
+    pool.fetch = AsyncMock(return_value=[{"telegram_user_id": 777}])
+    deps = make_deps(pool=pool)
+    restricted_chat = SimpleNamespace(id=7, restricted=True, digest_language="ru")
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=restricted_chat))
+
+    callback = _callback_obj(clicker_id=777, bot_id=42)
+    assert await commands.ensure_chat_for_callback(deps, callback) is restricted_chat
+
+
+async def test_ensure_chat_for_callback_denies_when_clicker_not_whitelisted(monkeypatch):
+    pool = AsyncMock()
+    pool.fetch = AsyncMock(return_value=[{"telegram_user_id": 777}])
+    deps = make_deps(pool=pool)
+    restricted_chat = SimpleNamespace(id=7, restricted=True, digest_language="ru")
+    monkeypatch.setattr(commands.repo, "upsert_chat", AsyncMock(return_value=restricted_chat))
+
+    callback = _callback_obj(clicker_id=999, bot_id=42)
+    assert await commands.ensure_chat_for_callback(deps, callback) is None
+
+
 async def test_start_returns_help(monkeypatch):
     deps = make_deps()
     reply = await commands.handle_start(deps, CHAT)

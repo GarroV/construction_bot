@@ -130,14 +130,8 @@ async def handle_membership(deps, telegram_chat_id: int, new_status: str) -> Non
         await repo.deactivate_chat(deps.pool, r["id"])
 
 
-async def ensure_chat(deps, message: Message):
-    chat = await repo.upsert_chat(
-        deps.pool,
-        message.chat.id,
-        thread_id_of(message),
-        chat_title_of(message),
-        deps.settings.default_language,
-    )
+async def _ensure_chat_core(deps, chat_id: int, thread_id, title, user_id: int | None):
+    chat = await repo.upsert_chat(deps.pool, chat_id, thread_id, title, deps.settings.default_language)
     if not chat.restricted:
         return chat
     admins = {
@@ -146,9 +140,31 @@ async def ensure_chat(deps, message: Message):
             "SELECT telegram_user_id FROM chat_admins WHERE chat_id = $1", chat.id
         )
     }
-    if message.from_user and message.from_user.id in admins:
+    if user_id is not None and user_id in admins:
         return chat
     return None  # §6: restricted и не в вайтлисте
+
+
+async def ensure_chat(deps, message: Message):
+    """Команды и reply: адресат права — автор сообщения (message.from_user)."""
+    return await _ensure_chat_core(
+        deps, message.chat.id, thread_id_of(message), chat_title_of(message),
+        message.from_user.id if message.from_user else None,
+    )
+
+
+async def ensure_chat_for_callback(deps, callback):
+    """Callback-путь инлайн-меню (правка ревью, Critical): callback.message — это
+    сообщение БОТА (автор кнопки), не нажавшего. Проверять права по
+    callback.message.from_user означало бы сверять id бота с вайтлистом — restricted-чат
+    отваливался бы даже для админа в вайтлисте. Чат/тред/title всё равно берём из
+    callback.message (там же, где висит кнопка), а user_id — из callback.from_user
+    (реально нажавший)."""
+    message = callback.message
+    return await _ensure_chat_core(
+        deps, message.chat.id, thread_id_of(message), chat_title_of(message),
+        callback.from_user.id if callback.from_user else None,
+    )
 
 
 def _args_of(message: Message) -> str:

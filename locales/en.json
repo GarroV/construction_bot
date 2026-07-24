@@ -28,6 +28,7 @@
   "menu_cancelled": "Cancelled",
   "report_running": "⏳ Building the report…",
   "report_empty": "No changes since the last digest",
+  "report_errors": "⚠️ Some of the report could not be collected — see logs for details",
   "btn_add": "➕ Add a card",
   "btn_rm": "🗑 Remove",
   "btn_report": "📊 Report now",
