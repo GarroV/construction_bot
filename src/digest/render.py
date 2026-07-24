@@ -16,7 +16,11 @@ def card_message(delta: CardDelta, summary: str | None, task_url: str, locales, 
         lines.append(f"✔ {delta.checklist_done}/{delta.checklist_total}")
     for f in delta.files:
         name = html.escape(f.name)
-        lines.append(f'📎 <a href="{html.escape(f.url, quote=True)}">{name}</a>' if f.url else f"📎 {name}")
+        if f.url:  # кликабельная ссылка — всегда ценность
+            lines.append(f'📎 <a href="{html.escape(f.url, quote=True)}">{name}</a>')
+        elif summary is None:  # fallback без LLM: в тексте вложения не упомянуты — не терять
+            lines.append(f"📎 {name}")
+        # файл без ссылки при живой LLM-выжимке не дублируем: он уже упомянут в контексте
     return clip("\n".join(lines))
 
 

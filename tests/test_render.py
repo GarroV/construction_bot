@@ -20,7 +20,8 @@ def test_card_message_with_summary_escapes_and_links():
     assert '<a href="https://p/task/8017/">Бишкек &lt;8&gt;</a>' in msg
     assert "Сводка &lt;дня&gt; &amp; выводы" in msg          # LLM-текст экранирован
     assert '<a href="https://p/disk/1">план&lt;1&gt;.pdf</a>' in msg
-    assert "без ссылки" in msg and 'href=""' not in msg      # файл без DETAIL_URL — именем
+    assert "без ссылки" not in msg  # файл без url при живой выжимке не дублируем (он в контексте)
+    assert 'href=""' not in msg
 
 
 def test_card_message_fallback_lists_raw_changes():
@@ -53,3 +54,9 @@ def test_urls_are_attribute_escaped():
     msg = render.card_message(delta, "s", 'https://p/task?x=1&y="2"', LOCALES, "ru")
     assert 'href="https://p/task?x=1&amp;y=&quot;2&quot;"' in msg
     assert 'href="https://p/1?a=1&amp;b=&quot;x&quot;"' in msg
+
+
+def test_fallback_keeps_linkless_files_visible():
+    """Fallback без LLM: вложения не упомянуты в тексте — 📎-список обязан их сохранить."""
+    msg = render.card_message(DELTA, None, "https://p/task/8017/", LOCALES, "ru")
+    assert "📎 без ссылки" in msg
