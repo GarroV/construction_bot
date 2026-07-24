@@ -1,6 +1,23 @@
+from dataclasses import dataclass
+
 from .client import BitrixClient
 
 _PAGE = 50
+
+
+@dataclass(frozen=True)
+class ChecklistSummary:
+    """Сводка по чек-листу задачи. Чек-листы Битрикса иерархичны: корни (PARENT_ID
+    отсутствует/None/"0"/0) — этапы, дети — конкретные пункты. Корневые галочки люди не
+    тыкают, поэтому статус этапа считаем ТОЛЬКО по его детям (см. docstring get_checklist_summary)."""
+
+    done: int  # выполнено пунктов по ВСЕМ строкам чек-листа (этапы + дети) — как раньше
+    total: int
+    has_stages: bool  # есть ли дети хоть у одного корня (иерархия вообще есть)
+    stage_title: str | None  # первый по SORT_INDEX корень с незакрытыми детьми; None,
+    # если has_stages=True и у всех корней дети выполнены («все этапы закрыты»)
+    stage_done: int
+    stage_total: int
 
 
 async def get_task(bx: BitrixClient, task_id: int) -> dict:
@@ -71,10 +88,57 @@ async def get_latest_comment_id(bx: BitrixClient, task_id: int) -> int:
     return max((int(r["ID"]) for r in _comment_records(res)), default=0)
 
 
-async def get_checklist_counts(bx: BitrixClient, task_id: int) -> tuple[int, int]:
+def _root_key(item: dict) -> str | None:
+    """None у корня (PARENT_ID отсутствует/None/"0"/0), иначе строковый ID родителя."""
+    parent_id = item.get("PARENT_ID")
+    if parent_id is None or str(parent_id) == "0":
+        return None
+    return str(parent_id)
+
+
+def _sort_key(item: dict) -> int:
+    """SORT_INDEX как int; мусорное/отсутствующее значение -> 0 (не роняем сборку)."""
+    try:
+        return int(item.get("SORT_INDEX"))
+    except (TypeError, ValueError):
+        return 0
+
+
+async def get_checklist_summary(bx: BitrixClient, task_id: int) -> ChecklistSummary:
+    """Сводка по чек-листу: общие done/total по всем пунктам (как раньше) плюс —
+    системной строкой, без LLM — первый незакрытый этап верхнего уровня. Статус этапа
+    определяется ТОЛЬКО по его детям: живой пример (tests/fixtures/live/checklist.json)
+    показывает, что владельцы чек-листа отмечают дочерние пункты, а корневую галочку
+    этапа — нет, поэтому она не является надёжным сигналом."""
     items = await bx.call("task.checklistitem.getlist", {"taskId": task_id}) or []
     done = sum(1 for i in items if str(i.get("IS_COMPLETE")) == "Y")
-    return done, len(items)
+    total = len(items)
+
+    roots = [i for i in items if _root_key(i) is None]
+    children_by_root: dict[str, list[dict]] = {}
+    for i in items:
+        parent = _root_key(i)
+        if parent is not None:
+            children_by_root.setdefault(parent, []).append(i)
+
+    has_stages = any(children_by_root.get(str(r.get("ID"))) for r in roots)
+
+    stage_title: str | None = None
+    stage_done = 0
+    stage_total = 0
+    for root in sorted(roots, key=_sort_key):
+        children = children_by_root.get(str(root.get("ID")), [])
+        c_done = sum(1 for c in children if str(c.get("IS_COMPLETE")) == "Y")
+        if children and c_done < len(children):
+            stage_title = str(root.get("TITLE") or "")
+            stage_done = c_done
+            stage_total = len(children)
+            break
+
+    return ChecklistSummary(
+        done=done, total=total, has_stages=has_stages,
+        stage_title=stage_title, stage_done=stage_done, stage_total=stage_total,
+    )
 
 
 async def get_latest_history_id(bx: BitrixClient, task_id: int) -> int:

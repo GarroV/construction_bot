@@ -31,17 +31,21 @@ async def collect_card_delta(bx, card: CardRow, cursor: CursorRow) -> CardDelta:
             (int(r["ID"]) for r in raw_comments), default=cursor.last_comment_id
         )
 
-    done, total = await methods.get_checklist_counts(bx, card.bitrix_task_id)
+    summary = await methods.get_checklist_summary(bx, card.bitrix_task_id)
 
     return CardDelta(
         task_id=card.bitrix_task_id,
         alias=card.alias or str(task.get("title") or f"#{card.bitrix_task_id}"),
         task_changes=parse.parse_history_events(history),
         comments=comments,
-        checklist_done=done,
-        checklist_total=total,
+        checklist_done=summary.done,
+        checklist_total=summary.total,
         files=files,
         new_history_id=max((int(r["id"]) for r in history), default=cursor.last_history_id),
         new_message_id=new_message_id,
         new_comment_id=new_comment_id,
+        stage_title=summary.stage_title,
+        stage_done=summary.stage_done,
+        stage_total=summary.stage_total,
+        has_stages=summary.has_stages,
     )

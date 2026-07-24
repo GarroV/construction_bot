@@ -29,6 +29,10 @@ class CardDelta:
     new_history_id: int
     new_message_id: int
     new_comment_id: int = 0  # курсор комментариев старой карточки без chatId (§13)
+    stage_title: str | None = None  # первый незакрытый этап чек-листа (системная строка, не LLM)
+    stage_done: int = 0
+    stage_total: int = 0
+    has_stages: bool = False  # есть ли у чек-листа иерархия этапов вообще
 
     @property
     def has_changes(self) -> bool:

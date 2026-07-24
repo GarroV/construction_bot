@@ -17,7 +17,7 @@ DELTA = CardDelta(
 
 def test_card_message_with_summary_escapes_and_links():
     msg = render.card_message(DELTA, "Сводка <дня> & выводы", "https://p/task/8017/", LOCALES, "ru")
-    assert '<a href="https://p/task/8017/">Бишкек &lt;8&gt;</a>' in msg
+    assert '🏗 <b><a href="https://p/task/8017/">Бишкек &lt;8&gt;</a></b>' in msg
     assert "Сводка &lt;дня&gt; &amp; выводы" in msg          # LLM-текст экранирован
     assert '<a href="https://p/disk/1">план&lt;1&gt;.pdf</a>' in msg
     assert "без ссылки" not in msg  # файл без url при живой выжимке не дублируем (он в контексте)
@@ -30,9 +30,53 @@ def test_card_message_fallback_lists_raw_changes():
     assert "статус: 2 → 5" in msg and "Иван" in msg
 
 
+def test_card_message_checklist_line_plain_when_no_stages():
+    """DELTA без иерархии (has_stages=False по умолчанию) -> плоская строка чек-листа,
+    и в LLM-режиме, и в fallback."""
+    msg_llm = render.card_message(DELTA, "Сводка", "https://p/task/8017/", LOCALES, "ru")
+    msg_fallback = render.card_message(DELTA, None, "https://p/task/8017/", LOCALES, "ru")
+    assert "📋 Чек-лист: 3/10" in msg_llm
+    assert "📋 Чек-лист: 3/10" in msg_fallback
+
+
+def test_card_message_checklist_line_shows_open_stage():
+    delta = CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[], comments=[],
+        checklist_done=40, checklist_total=71, files=[],
+        new_history_id=0, new_message_id=0,
+        has_stages=True, stage_title="02 Store design", stage_done=3, stage_total=17,
+    )
+    msg = render.card_message(delta, "Сводка", "https://p/task/8017/", LOCALES, "ru")
+    assert "📋 Этап: 02 Store design (3/17) · чек-лист 40/71" in msg
+
+
+def test_card_message_checklist_line_all_stages_closed():
+    delta = CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[], comments=[],
+        checklist_done=71, checklist_total=71, files=[],
+        new_history_id=0, new_message_id=0,
+        has_stages=True, stage_title=None, stage_done=0, stage_total=0,
+    )
+    msg = render.card_message(delta, "Сводка", "https://p/task/8017/", LOCALES, "ru")
+    assert "📋 Все этапы закрыты (71/71)" in msg
+
+
+def test_card_message_escapes_stage_title():
+    delta = CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[], comments=[],
+        checklist_done=1, checklist_total=2, files=[],
+        new_history_id=0, new_message_id=0,
+        has_stages=True, stage_title="<script>", stage_done=0, stage_total=1,
+    )
+    msg = render.card_message(delta, "Сводка", "https://p/task/8017/", LOCALES, "ru")
+    assert "<script>" not in msg
+    assert "&lt;script&gt;" in msg
+
+
 def test_no_changes_line():
     line = render.no_changes_line("Бишкек 8", "https://p/task/8017/", LOCALES, "ru")
     assert "изменений нет" in line and "Бишкек 8" in line
+    assert line.startswith("🏗 <b>")
 
 
 def test_clip_cuts_on_line_boundary():
