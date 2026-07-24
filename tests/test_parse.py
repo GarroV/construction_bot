@@ -6,7 +6,6 @@ import respx
 import httpx
 from src.bitrix.client import BitrixClient
 from src.bitrix import methods, parse
-from src.bitrix.links import FileLink
 
 FIX = Path("tests/fixtures")
 BASE = "https://portal.bitrix24.ru/rest/123/abc/"
@@ -71,7 +70,7 @@ async def test_fetch_new_chat_messages_uses_first_id():
     assert q["DIALOG_ID"] == "chat42" and q["FIRST_ID"] == "200"
 
 
-# --- Fallback старых карточек (§13): strip_bbcode / parse_comments / parse_comment_files ---
+# --- Fallback старых карточек (§13): strip_bbcode / parse_comments / extract_comment_files ---
 
 
 def test_strip_bbcode_user_tag():
@@ -125,12 +124,12 @@ def test_parse_comments_sorts_and_cleans_bbcode():
     assert [m.id for m in msgs] == [100, 101, 103]  # сортировка по int(ID) asc, не по порядку в списке
     assert msgs[1].text == "Пётр Петров написал:\nнужно согласовать\nСогласовано."
     assert msgs[2].text == "Иван Иванов, согласен, сделаем к пятнице. Смотри план."
-    assert all(m.file_ids == [] for m in msgs)  # файлы отдельно — parse_comment_files
+    assert all(m.file_ids == [] for m in msgs)  # файлы отдельно — extract_comment_files
 
 
 def test_parse_comments_fills_file_names_from_own_attached_objects():
     """file_names — имена вложений СВОЕГО комментария (id=101 несёт план.pdf), а не
-    общий пул ATTACHED_OBJECTS всех комментариев (тот собирает parse_comment_files)."""
+    общий пул ATTACHED_OBJECTS всех комментариев (тот собирает extract_comment_files)."""
     records = json.loads((FIX / "comments_page.json").read_text())
 
     msgs = parse.parse_comments(records)
@@ -139,14 +138,16 @@ def test_parse_comments_fills_file_names_from_own_attached_objects():
     assert msgs[1].file_names == ("план.pdf",)  # id=101 — своё ATTACHED_OBJECTS
 
 
-def test_parse_comment_files_names_only_no_secret_leak():
+def test_extract_comment_files_returns_name_and_comment_id():
+    """Переименовано из parse_comment_files (§8 фича 2): ссылка строится не на файл
+    (disk.file.get -> ACCESS_DENIED), а на комментарий-источник — нужен его id, не FileLink."""
     records = json.loads((FIX / "comments_page.json").read_text())
 
-    files = parse.parse_comment_files(records)
+    files = parse.extract_comment_files(records)
 
-    assert files == [FileLink(name="план.pdf", url=None)]
-    # инвариант §8: DOWNLOAD_URL/VIEW_URL (токен вебхука) не просачиваются наружу ни в имя, ни в url
-    dump = "".join(f"{f.name}{f.url}" for f in files)
+    assert files == [("план.pdf", 101)]  # (имя, id комментария id=101, несущего вложение)
+    # инвариант §8: DOWNLOAD_URL/VIEW_URL (токен вебхука) не просачиваются наружу ни в имя, ни в id
+    dump = "".join(f"{name}{comment_id}" for name, comment_id in files)
     assert "SUPER_SECRET_TOKEN" not in dump
 
 

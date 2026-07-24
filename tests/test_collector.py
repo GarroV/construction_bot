@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from src.bitrix.links import FileLink
@@ -6,6 +7,7 @@ from src.bitrix.parse import ChatMessage
 from src.digest import collector
 from src.repo import CardRow, CursorRow
 
+BX_BASE = "https://portal.bitrix24.ru/rest/123/abc/"
 CARD = CardRow(id=1, bitrix_task_id=8017, chat_id=1, alias="Бишкек 8", active=True)
 CUR = CursorRow(bitrix_task_id=8017, chat_id=1, last_history_id=20, last_message_id=200, last_comment_id=55)
 
@@ -57,9 +59,10 @@ async def test_collect_empty_delta_keeps_cursor(monkeypatch):
 
 async def test_collect_card_delta_old_card_uses_comments_and_skips_chat(monkeypatch):
     """§13 fallback: у задачи нет chatId (старая карточка коробочного портала) ->
-    комментарии идут через task.commentitem.getlist, файлы — без disk.file.get (§8:
-    ACCESS_DENIED на файлах старых карточек), im.dialog.messages.get не вызывается вовсе."""
-    bx = object()
+    комментарии идут через task.commentitem.getlist; файлы — без disk.file.get (§8:
+    ACCESS_DENIED на файлах старых карточек), ссылка вместо этого ведёт на комментарий-источник
+    (links.comment_url, фича 2); im.dialog.messages.get не вызывается вовсе."""
+    bx = SimpleNamespace(webhook_url=BX_BASE, webhook_user_id=123)
     monkeypatch.setattr(collector.methods, "fetch_new_history", AsyncMock(return_value=[]))
     monkeypatch.setattr(collector.methods, "get_task",
                         AsyncMock(return_value={"title": "Старая стройка"}))  # нет chatId
@@ -83,7 +86,11 @@ async def test_collect_card_delta_old_card_uses_comments_and_skips_chat(monkeypa
 
     assert delta.comments == [ChatMessage(id=103, author="Пётр", text="Иван, привет", file_ids=[],
                                           file_names=("план.pdf",))]
-    assert delta.files == [FileLink(name="план.pdf", url=None)]
+    assert delta.files == [FileLink(
+        name="план.pdf",
+        url="https://portal.bitrix24.ru/company/personal/user/123/tasks/task/view/8017/"
+            "?commentId=103#com103",
+    )]
     assert delta.new_comment_id == 103
     assert delta.new_message_id == cur.last_message_id  # старая карточка: курсор чата не двигается
     fetch_comments.assert_awaited_once_with(bx, 8017, 100)

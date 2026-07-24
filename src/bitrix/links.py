@@ -17,6 +17,13 @@ def task_url(webhook_url: str, webhook_user_id: int, task_id: int) -> str:
     return f"{host}/company/personal/user/{webhook_user_id}/tasks/task/view/{task_id}/"
 
 
+def comment_url(webhook_url: str, webhook_user_id: int, task_id: int, comment_id: int) -> str:
+    """Ссылка на КОММЕНТАРИЙ с файлом внутри карточки задачи (§8 фича 2): прямой доступ
+    к файлам комментариев закрыт (disk.file.get -> ACCESS_DENIED, см. parse.extract_comment_files),
+    владелец утвердил — линковать на комментарий-источник, не на сам файл."""
+    return f"{task_url(webhook_url, webhook_user_id, task_id)}?commentId={comment_id}#com{comment_id}"
+
+
 async def resolve_files(bx: BitrixClient, file_ids: list[int]) -> list[FileLink]:
     out: list[FileLink] = []
     for fid in file_ids:

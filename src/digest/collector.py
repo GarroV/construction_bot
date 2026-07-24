@@ -19,13 +19,21 @@ async def collect_card_delta(bx, card: CardRow, cursor: CursorRow) -> CardDelta:
         new_comment_id = cursor.last_comment_id
     else:
         # Старая карточка (§13 fallback): нет chatId -> im.dialog.messages.get недоступен,
-        # комментарии читаем через task.commentitem.getlist, файлы — без disk.file.get
-        # (ACCESS_DENIED на файлах старых карточек, см. parse_comment_files).
+        # комментарии читаем через task.commentitem.getlist. Файлы — без disk.file.get
+        # (ACCESS_DENIED на файлах старых карточек, см. extract_comment_files); вместо прямой
+        # ссылки на файл строим ссылку на комментарий-источник (§8 фича 2, links.comment_url).
         raw_comments = await methods.fetch_new_comments(
             bx, card.bitrix_task_id, cursor.last_comment_id
         )
         comments = parse.parse_comments(raw_comments)
-        files = parse.parse_comment_files(raw_comments)
+        files = [
+            links.FileLink(
+                name=name,
+                url=links.comment_url(bx.webhook_url, bx.webhook_user_id,
+                                      card.bitrix_task_id, comment_id),
+            )
+            for name, comment_id in parse.extract_comment_files(raw_comments)
+        ]
         new_message_id = cursor.last_message_id
         new_comment_id = max(
             (int(r["ID"]) for r in raw_comments), default=cursor.last_comment_id

@@ -59,6 +59,12 @@ class BitrixClient:
         # https://portal/rest/<user_id>/<token>/ -> <user_id>
         return int(self._base.rstrip("/").split("/")[-2])
 
+    @property
+    def webhook_url(self) -> str:
+        """Полный base вебхука (с завершающим /) — нужен коллектору для ссылок на
+        комментарий-источник файла (§8 фича 2, links.comment_url)."""
+        return self._base
+
     async def call(self, method: str, params: dict | None = None) -> Any:
         for attempt in range(_MAX_ATTEMPTS):
             await self._wait_slot()

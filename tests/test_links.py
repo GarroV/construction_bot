@@ -12,6 +12,16 @@ def test_task_url_built_from_webhook_host():
     assert url == "https://portal.bitrix24.ru/company/personal/user/123/tasks/task/view/8017/"
 
 
+def test_comment_url_points_at_comment_inside_task_view():
+    """§8 (фича 2): прямой доступ к файлам комментариев закрыт (disk.file.get ->
+    ACCESS_DENIED) — владелец утвердил линковать на комментарий-источник в карточке."""
+    url = links.comment_url(BASE, 123, 8017, 55)
+    assert url == (
+        "https://portal.bitrix24.ru/company/personal/user/123/tasks/task/view/8017/"
+        "?commentId=55#com55"
+    )
+
+
 @respx.mock
 async def test_resolve_files_returns_detail_url_and_survives_errors():
     route = respx.get(BASE + "disk.file.get.json")

@@ -54,6 +54,12 @@ def test_webhook_user_id_parsed_from_url(http):
     assert bx.webhook_user_id == 123
 
 
+def test_webhook_url_returns_full_base(http):
+    """§8 фича 2: коллектору нужен полный base вебхука для links.comment_url."""
+    bx = BitrixClient(BASE, http)
+    assert bx.webhook_url == BASE
+
+
 @respx.mock
 async def test_non_503_http_status_wrapped_in_bitrix_error(http):
     """500 не должен улетать наружу голым HTTPStatusError (§ фикс №4): вызывающий код

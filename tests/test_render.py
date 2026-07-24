@@ -137,3 +137,74 @@ def test_card_message_shows_linkless_file_not_mentioned_in_summary():
         delta, "Обсудили общий прогресс, всё по графику", "https://p/task/1/", LOCALES, "ru"
     )
     assert "📎 план.pdf" in msg
+
+
+# --- Кликабельные файлы: инлайн-ссылка в тексте выжимки (§8 фича 2) ---
+
+
+def test_card_message_inlines_link_when_file_mentioned_in_summary():
+    """Файл с url упомянут дословно в тексте выжимки -> имя внутри текста становится
+    ссылкой на комментарий-источник, а в 📎-блоке внизу НЕ дублируется."""
+    delta = CardDelta(
+        task_id=1, alias="X", task_changes=[], comments=[],
+        checklist_done=0, checklist_total=0,
+        files=[FileLink(name="план.pdf", url="https://p/task/1/?commentId=5#com5")],
+        new_history_id=0, new_message_id=0,
+    )
+    msg = render.card_message(
+        delta, "Обсудили план.pdf, согласовали сроки", "https://p/task/1/", LOCALES, "ru"
+    )
+    assert '<a href="https://p/task/1/?commentId=5#com5">план.pdf</a>' in msg
+    assert "📎" not in msg  # ссылка уже в тексте — дубль в 📎-блоке не нужен
+
+
+def test_card_message_shows_file_with_url_in_footer_when_not_mentioned():
+    """Файл с url НЕ упомянут дословно в тексте выжимки -> страховка обязана показать
+    ссылку в 📎-блоке (та же логика, что у url-less файлов)."""
+    delta = CardDelta(
+        task_id=1, alias="X", task_changes=[], comments=[],
+        checklist_done=0, checklist_total=0,
+        files=[FileLink(name="план.pdf", url="https://p/task/1/?commentId=5#com5")],
+        new_history_id=0, new_message_id=0,
+    )
+    msg = render.card_message(
+        delta, "Обсудили общий прогресс, всё по графику", "https://p/task/1/", LOCALES, "ru"
+    )
+    assert '📎 <a href="https://p/task/1/?commentId=5#com5">план.pdf</a>' in msg
+    assert msg.count("план.pdf") == 1  # только в 📎-блоке, в тексте выжимки имени не было
+
+
+def test_card_message_linkless_branch_still_works_alongside_inline_linking():
+    """Смешанный случай: один файл со ссылкой упомянут (инлайнится в текст), другой без
+    ссылки не упомянут (уходит в 📎 как раньше) — ветки не мешают друг другу."""
+    delta = CardDelta(
+        task_id=1, alias="X", task_changes=[], comments=[],
+        checklist_done=0, checklist_total=0,
+        files=[
+            FileLink(name="план.pdf", url="https://p/task/1/?commentId=5#com5"),
+            FileLink(name="смета.xlsx", url=None),
+        ],
+        new_history_id=0, new_message_id=0,
+    )
+    msg = render.card_message(
+        delta, "Обсудили план.pdf, вопросы по бюджету открыты", "https://p/task/1/", LOCALES, "ru"
+    )
+    assert '<a href="https://p/task/1/?commentId=5#com5">план.pdf</a>' in msg
+    assert "📎 смета.xlsx" in msg
+    assert "📎 план.pdf" not in msg
+
+
+def test_fallback_mode_shows_footer_links_without_inlining_names():
+    """Fallback (нет LLM-выжимки) — 📎-строки со ссылками для всех файлов с url;
+    имена файлов в fallback-тексте (списке сырых изменений) не линкуются."""
+    delta = CardDelta(
+        task_id=1, alias="X", task_changes=["план.pdf: добавлен"], comments=[],
+        checklist_done=0, checklist_total=0,
+        files=[FileLink(name="план.pdf", url="https://p/task/1/?commentId=5#com5")],
+        new_history_id=0, new_message_id=0,
+    )
+    msg = render.card_message(delta, None, "https://p/task/1/", LOCALES, "ru")
+    assert '📎 <a href="https://p/task/1/?commentId=5#com5">план.pdf</a>' in msg
+    # в самом fallback-тексте (сырые task_changes) имя НЕ обёрнуто в <a> — только в 📎-блоке
+    assert "план.pdf: добавлен" in msg
+    assert msg.count("<a ") == 2  # заголовок карточки + одна ссылка в 📎-блоке

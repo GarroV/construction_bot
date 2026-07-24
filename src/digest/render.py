@@ -26,24 +26,33 @@ def card_message(delta: CardDelta, summary: str | None, task_url: str, locales, 
     header = f'🏗 <b><a href="{html.escape(task_url, quote=True)}">{html.escape(delta.alias)}</a></b>'
     lines = [header, _checklist_line(delta, locales, lang)]
     if summary is not None:
-        lines.append(html.escape(summary.strip()))
+        escaped_summary = html.escape(summary.strip())
+        for f in delta.files:
+            if f.url and f.name in summary:
+                # Инлайн-ссылка (§8 фича 2): имя файла упомянуто LLM дословно в тексте
+                # выжимки — превращаем его прямо там в кликабельную ссылку на комментарий-
+                # источник, вместо дубля в 📎-блоке ниже.
+                escaped_name = html.escape(f.name)
+                anchor = f'<a href="{html.escape(f.url, quote=True)}">{escaped_name}</a>'
+                escaped_summary = escaped_summary.replace(escaped_name, anchor)
+        lines.append(escaped_summary)
     else:  # деградация без LLM (§7 п.6)
         lines.append(t(locales, lang, "fallback_notice"))
         lines += [html.escape(ln) for ln in delta.task_changes]
         lines += [f"{html.escape(m.author)}: {html.escape(m.text[:200])}" for m in delta.comments]
     for f in delta.files:
         name = html.escape(f.name)
-        if f.url:  # кликабельная ссылка — всегда ценность
-            lines.append(f'📎 <a href="{html.escape(f.url, quote=True)}">{name}</a>')
-        elif summary is None or f.name not in summary:
-            # Страховка от молчаливой потери (§7): без ссылки файл добавляем, если LLM не
-            # упомянула его имя дословно в тексте выжимки — либо выжимки вообще нет
-            # (fallback). Промпт просит LLM в насыщенный день приоритизировать и опускать
-            # мелочи — файл может не попасть в текст: тогда 📎-строка обязана его показать,
-            # а не молча потерять. `f.name not in summary` — по сырому (неэкранированному)
-            # summary: LLM инструктирована упоминать имена дословно.
+        # Страховка от молчаливой потери (§7): файл добавляем в 📎-блок, если LLM не
+        # упомянула его имя дословно в тексте выжимки — либо выжимки вообще нет (fallback,
+        # там имена никогда не считаются «упомянутыми» — footer-ссылка нужна всем файлам
+        # с url). `f.name not in summary` — по сырому (неэкранированному) summary: LLM
+        # инструктирована упоминать имена дословно.
+        mentioned = summary is not None and f.name in summary
+        if f.url:
+            if not mentioned:  # иначе уже заинлайнена в тексте выжимки — дубль не нужен
+                lines.append(f'📎 <a href="{html.escape(f.url, quote=True)}">{name}</a>')
+        elif not mentioned:
             lines.append(f"📎 {name}")
-        # иначе — файл уже упомянут дословно в тексте выжимки: 📎-строка была бы дублем
     return clip("\n".join(lines))
 
 

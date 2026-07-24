@@ -1,8 +1,6 @@
 import re
 from dataclasses import dataclass
 
-from .links import FileLink
-
 # Вайтлист реальных BB-тегов Битрикса (регистронезависимо). КРИТИЧНО: НЕ обобщать до
 # произвольного [\w+] — иначе легитимный текст в скобках («[важно]», сноски «[1]», «[TODO]»)
 # молча теряется перед LLM (нашлось ревью). Только эти теги подлежат удалению/снятию.
@@ -108,7 +106,7 @@ def strip_bbcode(text: str) -> str:
 
 def parse_comments(records: list[dict]) -> list[ChatMessage]:
     """task.commentitem.getlist -> ChatMessage (§13 fallback). file_ids сюда не попадают —
-    их даёт parse_comment_files (id вложений комментариев — не то же пространство id,
+    их даёт extract_comment_files (id вложений комментариев — не то же пространство id,
     что file_ids чата задачи); file_names — только имена своих ATTACHED_OBJECTS, для
     упоминания вложений в контексте этого комментария в промпте LLM."""
     out = [
@@ -130,14 +128,17 @@ def _attached_object_names(record: dict) -> tuple[str, ...]:
     return tuple(str(obj.get("NAME")) for obj in items if obj.get("NAME"))
 
 
-def parse_comment_files(records: list[dict]) -> list[FileLink]:
-    """ATTACHED_OBJECTS старых комментариев -> FileLink без ссылки (§8, §13): disk.file.get
-    на файлы старых карточек отдаёт ACCESS_DENIED, постоянные ссылки не строим. Инвариант:
-    DOWNLOAD_URL/VIEW_URL (несут токен вебхука) сюда не читаются и никогда не попадают наружу."""
-    out: list[FileLink] = []
+def extract_comment_files(records: list[dict]) -> list[tuple[str, int]]:
+    """ATTACHED_OBJECTS старых комментариев -> (имя файла, id комментария-источника) (§8, §13):
+    disk.file.get на файлы старых карточек отдаёт ACCESS_DENIED, поэтому ссылка строится не на
+    файл, а на комментарий, в котором он встречается (links.comment_url, собирает collector) —
+    отсюда возвращаем id комментария, а не FileLink напрямую. Инвариант: DOWNLOAD_URL/VIEW_URL
+    (несут токен вебхука) сюда не читаются и никогда не попадают наружу."""
+    out: list[tuple[str, int]] = []
     for r in records:
+        comment_id = int(r["ID"])
         attached = r.get("ATTACHED_OBJECTS") or {}
         items = attached.values() if isinstance(attached, dict) else attached
         for obj in items:
-            out.append(FileLink(name=str(obj.get("NAME") or ""), url=None))
+            out.append((str(obj.get("NAME") or ""), comment_id))
     return out
