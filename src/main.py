@@ -14,6 +14,7 @@ from src.digest import llm as llm_mod
 from src.digest.scheduler import Deps, dry_run_send, tick
 from src.i18n import load_locales
 from src.telegram.commands import build_router
+from src.telegram.menu import build_menu_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -50,11 +51,17 @@ async def main() -> None:
             BotCommand(command="remove", description="Снять карточку: /remove 42103"),
             BotCommand(command="time", description="Время дайджеста: /time 09:00 Europe/Belgrade"),
             BotCommand(command="lang", description="Язык дайджеста: /lang ru"),
+            BotCommand(command="menu", description="Панель управления: кнопки вместо команд"),
+            BotCommand(command="report", description="Отчёт по стройкам прямо сейчас"),
             BotCommand(command="help", description="Как пользоваться ботом"),
         ])
 
         dp = Dispatcher()
         dp.include_router(build_router(deps))
+        # menu-router — ПОСЛЕ command-router: у команд есть фильтр Command, у menu-router
+        # reply-хендлер стоит без фильтра адресации (ловит любой reply на бота) — порядок
+        # не даёт reply-хендлеру перехватить команды раньше их собственных обработчиков.
+        dp.include_router(build_menu_router(deps))
         # privacy mode включён: до бота доходят только команды и reply (§14)
         await dp.start_polling(deps.bot)
 

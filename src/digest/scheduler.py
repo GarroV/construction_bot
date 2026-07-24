@@ -53,7 +53,13 @@ def is_ping_due(chat: ChatRow, now_utc: dt.datetime, ping_days: int, has_active_
     return (now_utc - anchor) >= dt.timedelta(days=ping_days)
 
 
-async def process_chat(deps: Deps, chat: ChatRow, now_utc: dt.datetime) -> list[str]:
+async def process_chat(
+    deps: Deps, chat: ChatRow, now_utc: dt.datetime, mark_run: bool = True
+) -> tuple[list[str], bool]:
+    """Прогон дайджеста чата. mark_run=False — «Отчёт сейчас» (/report, §5): курсоры
+    двигаются как в обычном тике, но last_digest_date НЕ трогаем (дневной дайджест по
+    расписанию должен сработать сам) и пинг-ветку пропускаем (иначе /report мог бы
+    «съесть» недельный пинг за счёт mark_posted, который остаётся безусловным)."""
     errors: list[str] = []
     local_date = now_utc.astimezone(ZoneInfo(chat.timezone)).date()
     lang = chat.digest_language
@@ -101,16 +107,17 @@ async def process_chat(deps: Deps, chat: ChatRow, now_utc: dt.datetime) -> list[
                 errors.append(f"{_chat_label(chat)}: карточка #{delta.task_id}: {e}")
                 continue
 
-    await repo.mark_digest_run(deps.pool, chat.id, local_date)  # всегда (§7 п.9)
+    if mark_run:
+        await repo.mark_digest_run(deps.pool, chat.id, local_date)  # всегда, кроме /report (§7 п.9)
     if posted:
         await repo.mark_posted(deps.pool, chat.id)
-    elif is_ping_due(chat, now_utc, deps.settings.weekly_ping_days, bool(cards)):
+    elif mark_run and is_ping_due(chat, now_utc, deps.settings.weekly_ping_days, bool(cards)):
         since = (chat.last_posted_at or chat.created_at).date()
         ping = t(deps.locales, lang, "weekly_ping", date=since.isoformat())
         result = await deps.send_fn(deps.bot, chat.telegram_chat_id, chat.message_thread_id, ping)
         if result.ok:
             await repo.mark_ping(deps.pool, chat.id)
-    return errors
+    return errors, posted
 
 
 async def _summarize_or_none(deps, delta, lang, date_str, errors, chat) -> str | None:
@@ -134,7 +141,8 @@ async def tick(deps: Deps, now_utc: dt.datetime | None = None) -> None:
         try:
             if not is_digest_due(chat, now_utc):  # невалидная tz одного чата не должна глушить остальные
                 continue
-            errors += await process_chat(deps, chat, now_utc)
+            chat_errors, _posted = await process_chat(deps, chat, now_utc)
+            errors += chat_errors
         except Exception as e:
             log.exception("прогон чата %s", chat.id)
             errors.append(f"{_chat_label(chat)}: прогон упал: {e}")

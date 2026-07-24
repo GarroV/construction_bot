@@ -159,9 +159,9 @@ def _args_of(message: Message) -> str:
 def build_router(deps) -> Router:
     router = Router()
 
-    def register(cmd: str, core):
+    def register(cmd: str, core, *, attach_menu: bool = False):
         @router.message(Command(cmd))
-        async def _handler(message: Message, _core=core):
+        async def _handler(message: Message, _core=core, _attach_menu=attach_menu):
             if not _addressed_to_me(message, getattr(deps, "bot_username", "")):
                 return  # голая команда в группе — молчим (адресность при нескольких ботах)
             chat = await ensure_chat(deps, message)
@@ -177,9 +177,17 @@ def build_router(deps) -> Router:
                 text = await _core(deps, chat)
             else:
                 text = await _core(deps, chat, _args_of(message))
-            await message.reply(text)
+            if _attach_menu:
+                # локальный импорт (не на уровне модуля): menu.py импортирует ядра
+                # отсюда же на уровне модуля — импорт на уровне модуля дал бы цикл.
+                from src.telegram.menu import build_panel_keyboard
+                await message.reply(
+                    text, reply_markup=build_panel_keyboard(deps.locales, chat.digest_language)
+                )
+            else:
+                await message.reply(text)
 
-    register("start", handle_start)
+    register("start", handle_start, attach_menu=True)
     register("help", handle_start)
     register("add", handle_add)
     register("remove", handle_remove)

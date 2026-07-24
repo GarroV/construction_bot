@@ -90,7 +90,7 @@ async def test_marks_run_even_when_send_raises(monkeypatch):
     deps = make_deps(send_fn)
 
     # чат создан 2026-07-01: держим прогон в пределах недели, чтобы не задеть ветку пинга
-    errors = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
 
     assert errors  # ошибка попала в сводку, а не улетела исключением
     assert send_fn.await_count == 1
@@ -109,7 +109,7 @@ async def test_cursor_advances_only_on_ok(monkeypatch):
     send_fn = AsyncMock(return_value=SendResult(ok=False))
     deps = make_deps(send_fn)
 
-    errors = await scheduler.process_chat(deps, chat, now)
+    errors, posted = await scheduler.process_chat(deps, chat, now)
     assert errors
     repo_mocks.advance_cursor.assert_not_awaited()
     repo_mocks.mark_posted.assert_not_awaited()
@@ -132,7 +132,7 @@ async def test_forbidden_deactivates_and_marks_run(monkeypatch):
     send_fn = AsyncMock(return_value=SendResult(ok=False, forbidden=True))
     deps = make_deps(send_fn)
 
-    errors = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
 
     repo_mocks.deactivate_chat.assert_awaited_once_with(deps.pool, chat.id)
     assert any("выкинут" in e for e in errors)
@@ -190,6 +190,49 @@ async def test_ping_after_quiet_week(monkeypatch):
     repo_mocks.mark_posted.assert_not_awaited()
 
 
+async def test_report_mark_run_false_skips_mark_digest_run(monkeypatch):
+    """/report (§5): курсоры двигаются как обычно, но last_digest_date НЕ трогаем —
+    дневной дайджест должен сработать сам по расписанию."""
+    chat = make_chat()
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_WITH_CHANGES))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(
+        deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC), mark_run=False
+    )
+
+    assert not errors
+    assert posted is True
+    repo_mocks.mark_digest_run.assert_not_awaited()
+    repo_mocks.advance_cursor.assert_awaited_once()  # курсор всё же двигается
+    repo_mocks.mark_posted.assert_awaited_once_with(deps.pool, chat.id)
+
+
+async def test_report_mark_run_false_skips_ping_even_when_due(monkeypatch):
+    """/report не должен «съедать» недельный пинг: пинг-ветка целиком пропускается
+    при mark_run=False, даже если по предикату is_ping_due он бы сработал."""
+    chat = make_chat(last_posted_at=dt.datetime(2026, 7, 10, tzinfo=UTC))
+    repo_mocks = patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_EMPTY))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    now = dt.datetime(2026, 7, 21, 4, 0, tzinfo=UTC)  # 11 дней тишины >= weekly_ping_days=7
+    errors, posted = await scheduler.process_chat(deps, chat, now, mark_run=False)
+
+    assert not errors
+    assert posted is False
+    send_fn.assert_not_awaited()  # никакого пинга
+    repo_mocks.mark_ping.assert_not_awaited()
+    repo_mocks.mark_digest_run.assert_not_awaited()
+    repo_mocks.mark_posted.assert_not_awaited()
+
+
 async def test_bad_prompt_placeholder_falls_back_to_render(monkeypatch):
     """Опечатка в плейсхолдере prompts/digest.txt не должна ронять дайджест целиком
     (§ фикс №5): build_prompt внутри try, KeyError -> fallback-рендер."""
@@ -203,7 +246,7 @@ async def test_bad_prompt_placeholder_falls_back_to_render(monkeypatch):
     deps = make_deps(send_fn)
     deps.prompt_template = "{nonexistent_placeholder}"
 
-    errors = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
 
     assert errors  # ошибка сборки промпта попала в сводку
     summarize_mock.assert_not_awaited()  # до LLM даже не дошли
@@ -243,7 +286,7 @@ async def test_tick_isolates_chat_errors_and_reports_admin(monkeypatch):
     async def fake_process_chat(deps_arg, chat_arg, now_arg):
         if chat_arg.id == chat1.id:
             raise RuntimeError("boom1")
-        return ["ошибка X"]
+        return ["ошибка X"], True
 
     monkeypatch.setattr(scheduler, "process_chat", fake_process_chat)
 
@@ -265,7 +308,7 @@ async def test_tick_isolates_invalid_timezone_and_continues(monkeypatch):
     chat2 = make_chat(id=2, telegram_chat_id=-200, country="Казахстан")
     monkeypatch.setattr(scheduler.repo, "list_active_chats", AsyncMock(return_value=[chat1, chat2]))
 
-    process_chat_mock = AsyncMock(return_value=[])
+    process_chat_mock = AsyncMock(return_value=([], False))
     monkeypatch.setattr(scheduler, "process_chat", process_chat_mock)
 
     send_fn = AsyncMock(return_value=SendResult(ok=True))
@@ -290,7 +333,7 @@ async def test_admin_summary_escapes_html(monkeypatch):
     monkeypatch.setattr(scheduler.repo, "list_active_chats", AsyncMock(return_value=[chat]))
 
     async def fake_process_chat(deps_arg, chat_arg, now_arg):
-        return ["карточка <тест>: сбой"]
+        return ["карточка <тест>: сбой"], True
 
     monkeypatch.setattr(scheduler, "process_chat", fake_process_chat)
 
