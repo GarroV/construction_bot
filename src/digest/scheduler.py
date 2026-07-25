@@ -280,7 +280,7 @@ async def process_chat(
     return errors, posted
 
 
-async def _summarize_cached(deps, prompt: str, errors: list[str], chat) -> str | None:
+async def _summarize_cached(deps, prompt: str, errors: list[str], chat, task_id: int) -> str | None:
     """Точка вызова LLM, общая для дайджеста и overview-сводки (§7, кэш LLM-выжимок):
     ключ — хэш промпта (llm.material_hash), он детерминированно включает всё сырьё,
     так что совпадение хэша означает совпадение результата, а промпт меняется каждые
@@ -301,7 +301,7 @@ async def _summarize_cached(deps, prompt: str, errors: list[str], chat) -> str |
     try:
         text = await llm.summarize(deps.llm_client, deps.settings.openai_model, prompt)
     except llm.LlmUnavailable as e:
-        errors.append(f"{_chat_label(chat)}: LLM недоступен: {e}")
+        errors.append(f"{_chat_label(chat)}: LLM недоступен (#{task_id}): {e}")
         return None  # render уйдёт в fallback (§7 п.6)
 
     try:
@@ -319,7 +319,7 @@ async def _summarize_or_none(deps, delta, lang, date_str, errors, chat) -> str |
     except (KeyError, ValueError, IndexError) as e:
         errors.append(f"{_chat_label(chat)}: некорректный шаблон промпта (#{delta.task_id}): {e}")
         return None  # render уйдёт в fallback (§7 п.6)
-    return await _summarize_cached(deps, prompt, errors, chat)
+    return await _summarize_cached(deps, prompt, errors, chat, delta.task_id)
 
 
 async def _summarize_overview_or_none(deps, overview, lang, date_str, errors, chat) -> str | None:
@@ -335,7 +335,7 @@ async def _summarize_overview_or_none(deps, overview, lang, date_str, errors, ch
             f"{_chat_label(chat)}: некорректный шаблон промпта overview (#{overview.task_id}): {e}"
         )
         return None
-    return await _summarize_cached(deps, prompt, errors, chat)
+    return await _summarize_cached(deps, prompt, errors, chat, overview.task_id)
 
 
 async def tick(deps: Deps, now_utc: dt.datetime | None = None) -> None:

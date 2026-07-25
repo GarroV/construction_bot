@@ -875,7 +875,7 @@ async def test_summarize_cached_hit_does_not_call_summarize(monkeypatch):
     monkeypatch.setattr(scheduler.llm, "summarize", summarize_mock)
     errors: list[str] = []
 
-    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
+    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat(), 8017)
 
     assert result == "закэшированная выжимка"
     summarize_mock.assert_not_awaited()
@@ -893,7 +893,7 @@ async def test_summarize_cached_miss_calls_summarize_and_caches(monkeypatch):
     monkeypatch.setattr(scheduler.llm, "summarize", summarize_mock)
     errors: list[str] = []
 
-    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
+    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat(), 8017)
 
     assert result == "свежая выжимка"
     summarize_mock.assert_awaited_once()
@@ -919,8 +919,8 @@ async def test_summarize_cached_second_call_after_caching_is_a_hit(monkeypatch):
     monkeypatch.setattr(scheduler.llm, "summarize", summarize_mock)
     errors: list[str] = []
 
-    first = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
-    second = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
+    first = await scheduler._summarize_cached(deps, "промпт", errors, make_chat(), 8017)
+    second = await scheduler._summarize_cached(deps, "промпт", errors, make_chat(), 8017)
 
     assert first == second == "итоговая выжимка"
     summarize_mock.assert_awaited_once()
@@ -938,7 +938,7 @@ async def test_summarize_cached_get_failure_still_generates(monkeypatch):
     monkeypatch.setattr(scheduler.llm, "summarize", summarize_mock)
     errors: list[str] = []
 
-    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
+    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat(), 8017)
 
     assert result == "выжимка несмотря на сбой кэша"
     summarize_mock.assert_awaited_once()
@@ -953,7 +953,7 @@ async def test_summarize_cached_llm_unavailable_with_empty_cache_returns_none_wi
                         AsyncMock(side_effect=llm.LlmUnavailable("недоступен")))
     errors: list[str] = []
 
-    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
+    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat(), 8017)
 
     assert result is None
     assert errors
