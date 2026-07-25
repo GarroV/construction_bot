@@ -49,7 +49,8 @@ def test_card_message_checklist_line_shows_open_stage():
         has_stages=True, stage_title="02 Store design", stage_done=3, stage_total=17,
     )
     msg = render.card_message(delta, "Сводка", "https://p/task/8017/", LOCALES, "ru")
-    assert "📋 Этап: 02 Store design (3/17) · чек-лист 40/71" in msg
+    assert "📋 Этап: 02 Store design (3/17)" in msg
+    assert "чек-лист 40/71" not in msg  # общий счёт убран как шум
 
 
 def test_card_message_checklist_line_all_stages_closed():
@@ -60,7 +61,8 @@ def test_card_message_checklist_line_all_stages_closed():
         has_stages=True, stage_title=None, stage_done=0, stage_total=0,
     )
     msg = render.card_message(delta, "Сводка", "https://p/task/8017/", LOCALES, "ru")
-    assert "📋 Все этапы закрыты (71/71)" in msg
+    assert "📋 Чек-лист закрыт" in msg
+    assert "71/71" not in msg  # числа при закрытом чек-листе — шум
 
 
 def test_card_message_escapes_stage_title():
@@ -361,3 +363,25 @@ def test_card_message_substring_file_names_link_independently():
     # план.pdf не должен был "откусить" префикс план.pdf.bak и оставить хвост ".bak" снаружи тега
     assert "</a>.bak" not in msg
     assert "📎" not in msg
+
+
+def _checklist_delta(done, total, has_stages=False):
+    return CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[], comments=[],
+        checklist_done=done, checklist_total=total, files=[],
+        new_history_id=0, new_message_id=0,
+        has_stages=has_stages, stage_title=None, stage_done=0, stage_total=0,
+    )
+
+
+def test_card_message_no_checklist_at_all_hides_line():
+    """Карточка вовсе без чек-листа: строки 📋 нет (вместо бессмысленного «0/0»)."""
+    msg = render.card_message(_checklist_delta(0, 0), "Сводка", "https://p/task/8017/", LOCALES, "ru")
+    assert "📋" not in msg
+
+
+def test_card_message_flat_closed_checklist_says_closed():
+    """Плоский чек-лист (без этапов) закрыт полностью — «Чек-лист закрыт» без чисел."""
+    msg = render.card_message(_checklist_delta(9, 9), "Сводка", "https://p/task/8017/", LOCALES, "ru")
+    assert "📋 Чек-лист закрыт" in msg
+    assert "9/9" not in msg

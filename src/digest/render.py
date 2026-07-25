@@ -7,7 +7,7 @@ from src.i18n import t
 MESSAGE_LIMIT = 4000  # §14: запас под 4096 (after entities parsing) — общий лимит clip/chunk_blocks
 
 
-def _checklist_line(delta: CardDelta, locales, lang: str) -> str:
+def _checklist_line(delta: CardDelta, locales, lang: str) -> str | None:
     """Системная строка (не LLM) — этап чек-листа сейчас. Идёт и в LLM-режиме, и в
     fallback (§ дизайн владельца): первый незакрытый этап, «все этапы закрыты» либо
     плоский счётчик, если у чек-листа нет иерархии этапов вообще."""
@@ -19,8 +19,11 @@ def _checklist_line(delta: CardDelta, locales, lang: str) -> str:
             done=delta.checklist_done, total=delta.checklist_total,
         )
     if delta.has_stages:
-        return t(locales, lang, "checklist_all_closed",
-                  done=delta.checklist_done, total=delta.checklist_total)
+        return t(locales, lang, "checklist_all_closed")
+    if delta.checklist_total == 0:
+        return None  # чек-листа нет вовсе — "0/0" был бы шумом
+    if delta.checklist_done == delta.checklist_total:
+        return t(locales, lang, "checklist_all_closed")
     return t(locales, lang, "checklist_plain",
              done=delta.checklist_done, total=delta.checklist_total)
 
@@ -80,7 +83,10 @@ def _files_footer(files, summary: str | None) -> list[str]:
 
 
 def card_message(delta: CardDelta, summary: str | None, task_url: str, locales, lang: str) -> str:
-    lines = [_card_header(delta.alias, task_url), _checklist_line(delta, locales, lang)]
+    lines = [_card_header(delta.alias, task_url)]
+    checklist_line = _checklist_line(delta, locales, lang)
+    if checklist_line:  # None = чек-листа нет вовсе, строку не показываем
+        lines.append(checklist_line)
     if summary is not None:
         escaped_summary = html.escape(summary.strip())
         escaped_summary = _linkify_mentioned_files(escaped_summary, delta.files, summary)
@@ -114,7 +120,10 @@ def overview_message(
     плюс системная строка `notice` (report_no_new/report_no_new_never, с датой) перед
     строкой чек-листа — явно поясняет партнёру, что это не новые изменения, а срез
     текущего состояния по его запросу."""
-    lines = [_card_header(overview.alias, task_url), notice, _checklist_line(overview, locales, lang)]
+    lines = [_card_header(overview.alias, task_url), notice]
+    checklist_line = _checklist_line(overview, locales, lang)
+    if checklist_line:  # None = чек-листа нет вовсе
+        lines.append(checklist_line)
     if summary is not None:
         escaped_summary = html.escape(summary.strip())
         escaped_summary = _linkify_mentioned_files(escaped_summary, overview.files, summary)
