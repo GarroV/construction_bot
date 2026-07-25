@@ -11,7 +11,11 @@ from src.bitrix.parse import ChatMessage
 
 log = logging.getLogger(__name__)
 _ATTEMPTS = 3
-_MAX_TOKENS = 1500  # reasoning-модели (gpt-5) тратят часть бюджета на рассуждения
+# Бюджет ответа. Дефолт-модель gpt-5.6-terra — НЕ reasoning: весь бюджет идёт в текст
+# выжимки (~250–350 слов, с запасом влезает). История: на reasoning-модели (gpt-5-mini)
+# в насыщенный день скрытые рассуждения съедали весь бюджет 1500 → пустой content →
+# fallback «сбой обработки». Запас держим щедрым на случай смены модели обратно.
+_MAX_TOKENS = 2000
 
 
 class LlmUnavailable(Exception):
@@ -53,13 +57,28 @@ def _comment_line(m: ChatMessage) -> str:
     return line
 
 
+def checklist_state_text(delta: CardDelta) -> str:
+    """Человеческое состояние чек-листа для промпта (сырые числа вида «65/71» вводили
+    LLM в заблуждение: 71 включает заголовки этапов, которые никто не отмечает).
+    Логика зеркалит render._checklist_line, но без эмодзи и локализации — это сырьё
+    для LLM, он переведёт сам."""
+    if delta.stage_title is not None:
+        return f"этап «{delta.stage_title}» ({delta.stage_done}/{delta.stage_total})"
+    if delta.has_stages:
+        return "закрыт (все этапы выполнены)"
+    if delta.checklist_total == 0:
+        return "отсутствует"
+    if delta.checklist_done == delta.checklist_total:
+        return "закрыт"
+    return f"{delta.checklist_done}/{delta.checklist_total} выполнено"
+
+
 def build_prompt(template: str, delta: CardDelta, language: str, date_str: str) -> str:
     return template.format(
         language=language,
         date=date_str,
         pizzeria_name=delta.alias,
-        checklist_done=delta.checklist_done,
-        checklist_total=delta.checklist_total,
+        checklist_state=checklist_state_text(delta),
         task_changes="\n".join(delta.task_changes) or "-",
         comments="\n".join(_comment_line(m) for m in delta.comments) or "-",
         files="\n".join(f.name for f in delta.files) or "-",
@@ -77,8 +96,7 @@ def build_overview_prompt(template: str, overview: CardDelta, language: str, dat
         language=language,
         date=date_str,
         pizzeria_name=overview.alias,
-        checklist_done=overview.checklist_done,
-        checklist_total=overview.checklist_total,
+        checklist_state=checklist_state_text(overview),
         comments="\n".join(_comment_line(m) for m in overview.comments) or "-",
     )
 
@@ -114,10 +132,14 @@ async def summarize(client, model: str, prompt: str) -> str:
                 max_completion_tokens=_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
             )
-            content = resp.choices[0].message.content
+            choice = resp.choices[0]
+            content = choice.message.content
             if content is not None and content.strip():
                 return content
-            warning = "OpenAI вернул пустой ответ"  # пустой ответ — отказ, не результат (не ретраить как успех)
+            # Пустой ответ — отказ, не результат (не ретраить как успех). finish_reason в
+            # логе — ключ к диагностике: 'length' = модель упёрлась в max_completion_tokens
+            # (у reasoning-моделей его съедают скрытые рассуждения — это и был «сбой обработки»).
+            warning = f"OpenAI вернул пустой ответ (finish_reason={choice.finish_reason})"
         except Exception as e:
             if _is_client_error(e):  # 4xx не транзиентен — ретраи не помогут (§7 п.6)
                 log.warning("OpenAI 4xx, без ретраев: %s", e)

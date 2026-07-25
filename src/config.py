@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     bitrix_webhook_url: str
     telegram_bot_token: str
     openai_api_key: str
-    openai_model: str = "gpt-5-mini"
+    openai_model: str = "gpt-5.6-terra"
     postgres_dsn: str
     scheduler_tick_minutes: int = 5
     default_language: str = "ru"

@@ -185,3 +185,22 @@ def test_material_hash_changes_with_content():
 
 def test_material_hash_is_sha256_hex_digest():
     assert llm.material_hash("привет") == hashlib.sha256("привет".encode("utf-8")).hexdigest()
+
+
+def test_checklist_state_text_variants():
+    def d(**over):
+        base = dict(task_id=1, alias="X", task_changes=[], comments=[],
+                    checklist_done=0, checklist_total=0, files=[],
+                    new_history_id=0, new_message_id=0)
+        base.update(over)
+        return CardDelta(**base)
+
+    assert "этап «05 Delivery» (9/12)" in llm.checklist_state_text(
+        d(has_stages=True, stage_title="05 Delivery", stage_done=9, stage_total=12))
+    assert llm.checklist_state_text(d(has_stages=True, checklist_done=65, checklist_total=71)) == "закрыт (все этапы выполнены)"
+    assert llm.checklist_state_text(d()) == "отсутствует"
+    assert llm.checklist_state_text(d(checklist_done=9, checklist_total=9)) == "закрыт"
+    assert llm.checklist_state_text(d(checklist_done=3, checklist_total=9)) == "3/9 выполнено"
+    # сырые «65/71» больше не попадают в промпт закрытого чек-листа
+    prompt = llm.build_prompt(llm.load_prompt(), d(has_stages=True, checklist_done=65, checklist_total=71), "ru", "2026-07-25")
+    assert "65/71" not in prompt and "закрыт" in prompt

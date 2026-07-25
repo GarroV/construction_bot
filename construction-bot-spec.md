@@ -131,7 +131,7 @@
 
 Дата: {date}
 Пиццерия: {pizzeria_name}
-Чек-лист сейчас: {checklist_done}/{checklist_total} выполнено
+Чек-лист: {checklist_state}
 Изменения задачи (статус, дедлайн, чек-лист):
 {task_changes}
 
@@ -186,7 +186,7 @@
 
 Дата: {date}
 Пиццерия: {pizzeria_name}
-Чек-лист сейчас: {checklist_done}/{checklist_total} выполнено
+Чек-лист: {checklist_state}
 
 Последние комментарии (автор -> сообщение):
 {comments}
@@ -340,7 +340,7 @@ CREATE TABLE llm_cache (                          -- миграция 0004_llm_c
 BITRIX_WEBHOOK_URL=https://<portal>.bitrix24.ru/rest/<user_id>/<token>/
 TELEGRAM_BOT_TOKEN=<from BotFather>
 OPENAI_API_KEY=<key>
-OPENAI_MODEL=gpt-5-mini          # для выжимок достаточно; ~единицы $/мес на 24 страны
+OPENAI_MODEL=gpt-5.6-terra       # НЕ reasoning-модель: не съедает бюджет токенов на рассуждения (см. §7); для выжимок достаточно
 POSTGRES_DSN=postgresql://user:pass@postgres:5432/botdb
 TZ=UTC                           # таймзона процесса; время дайджестов — per-chat в БД (§12)
 SCHEDULER_TICK_MINUTES=5

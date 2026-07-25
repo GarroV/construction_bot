@@ -12,7 +12,7 @@ def test_settings_from_env(monkeypatch):
     s = load_settings()
 
     assert s.bitrix_webhook_url == "https://portal.bitrix24.ru/rest/123/abc/"
-    assert s.openai_model == "gpt-5-mini"          # дефолт
+    assert s.openai_model == "gpt-5.6-terra"       # дефолт
     assert s.scheduler_tick_minutes == 5           # дефолт
     assert s.default_language == "ru"              # дефолт
     assert s.weekly_ping_days == 7                 # дефолт

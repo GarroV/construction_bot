@@ -5,7 +5,7 @@
 
 Дата: {date}
 Пиццерия: {pizzeria_name}
-Чек-лист сейчас: {checklist_done}/{checklist_total} выполнено
+Чек-лист: {checklist_state}
 Изменения задачи (статус, дедлайн, чек-лист):
 {task_changes}
 
