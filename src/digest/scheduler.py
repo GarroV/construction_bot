@@ -280,36 +280,62 @@ async def process_chat(
     return errors, posted
 
 
+async def _summarize_cached(deps, prompt: str, errors: list[str], chat) -> str | None:
+    """Точка вызова LLM, общая для дайджеста и overview-сводки (§7, кэш LLM-выжимок):
+    ключ — хэш промпта (llm.material_hash), он детерминированно включает всё сырьё,
+    так что совпадение хэша означает совпадение результата, а промпт меняется каждые
+    сутки сам по себе из-за {date} (TTL 24h в репозитории — вторая, независимая
+    страховка). Кэш есть — LLM вообще не дёргаем. Кэша нет — как раньше: сгенерировать,
+    LlmUnavailable -> errors + None (fallback-рендер у вызывающего). Сбой самого кэша
+    (БД глюкнула) НЕ должен ломать генерацию — get/put обёрнуты в try/except, работаем
+    без кэша."""
+    material = llm.material_hash(prompt)
+    cached = None
+    try:
+        cached = await repo.get_cached_llm(deps.pool, material)
+    except Exception as e:
+        log.warning("get_cached_llm упал, работаем без кэша: %s", e)
+    if cached is not None:
+        return cached
+
+    try:
+        text = await llm.summarize(deps.llm_client, deps.settings.openai_model, prompt)
+    except llm.LlmUnavailable as e:
+        errors.append(f"{_chat_label(chat)}: LLM недоступен: {e}")
+        return None  # render уйдёт в fallback (§7 п.6)
+
+    try:
+        await repo.put_cached_llm(deps.pool, material, text)
+    except Exception as e:
+        log.warning("put_cached_llm упал, работаем без кэша: %s", e)
+    return text
+
+
 async def _summarize_or_none(deps, delta, lang, date_str, errors, chat) -> str | None:
     try:
         # build_prompt внутри try: опечатка в плейсхолдере prompts/digest.txt (владелец правит
         # его руками, §9) не должна ронять весь дайджест — трактуем как отказ LLM (fallback-рендер)
         prompt = llm.build_prompt(deps.prompt_template, delta, lang, date_str)
-        return await llm.summarize(deps.llm_client, deps.settings.openai_model, prompt)
-    except llm.LlmUnavailable as e:
-        errors.append(f"{_chat_label(chat)}: LLM недоступен (#{delta.task_id}): {e}")
-        return None  # render уйдёт в fallback (§7 п.6)
     except (KeyError, ValueError, IndexError) as e:
         errors.append(f"{_chat_label(chat)}: некорректный шаблон промпта (#{delta.task_id}): {e}")
         return None  # render уйдёт в fallback (§7 п.6)
+    return await _summarize_cached(deps, prompt, errors, chat)
 
 
 async def _summarize_overview_or_none(deps, overview, lang, date_str, errors, chat) -> str | None:
     """Аналог _summarize_or_none для сводки текущего состояния (§5, overview_on_empty):
     отдельная функция, а не параметризация общей — разные шаблон/prompt-билдер, тот же
     паттерн отказоустойчивости (LLM недоступен/битый промпт -> None, render уйдёт в
-    сырой fallback-список последних комментариев)."""
+    сырой fallback-список последних комментариев). Сам вызов LLM (с кэшем) — общий
+    _summarize_cached."""
     try:
         prompt = llm.build_overview_prompt(deps.overview_template, overview, lang, date_str)
-        return await llm.summarize(deps.llm_client, deps.settings.openai_model, prompt)
-    except llm.LlmUnavailable as e:
-        errors.append(f"{_chat_label(chat)}: LLM недоступен для сводки (#{overview.task_id}): {e}")
-        return None
     except (KeyError, ValueError, IndexError) as e:
         errors.append(
             f"{_chat_label(chat)}: некорректный шаблон промпта overview (#{overview.task_id}): {e}"
         )
         return None
+    return await _summarize_cached(deps, prompt, errors, chat)
 
 
 async def tick(deps: Deps, now_utc: dt.datetime | None = None) -> None:

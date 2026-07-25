@@ -249,3 +249,53 @@ async def test_update_chat_telegram_id(pool):
     await repo.update_chat_telegram_id(pool, chat.id, -200)
     fresh = (await repo.list_active_chats(pool))[0]
     assert fresh.telegram_chat_id == -200
+
+
+# --- Кэш LLM-выжимок (миграция 0004, TTL 24h) ---
+
+
+async def test_get_cached_llm_miss_returns_none(pool):
+    assert await repo.get_cached_llm(pool, "нет-такого-хэша") is None
+
+
+async def test_put_then_get_cached_llm_is_a_hit(pool):
+    await repo.put_cached_llm(pool, "hash-1", "готовая выжимка")
+
+    assert await repo.get_cached_llm(pool, "hash-1") == "готовая выжимка"
+
+
+async def test_get_cached_llm_expired_after_24h_is_a_miss(pool):
+    """Строка старше TTL (24h) должна считаться миссом, даже если физически ещё в таблице —
+    руками состариваем created_at на 25h назад (владелец, §7: TTL — вторая страховка поверх
+    того, что промпт и так меняется каждые сутки из-за даты)."""
+    await repo.put_cached_llm(pool, "hash-2", "старая выжимка")
+    await pool.execute(
+        "UPDATE llm_cache SET created_at = now() - interval '25 hours' WHERE material_hash = $1",
+        "hash-2",
+    )
+
+    assert await repo.get_cached_llm(pool, "hash-2") is None
+
+
+async def test_put_cached_llm_upsert_updates_existing_row(pool):
+    await repo.put_cached_llm(pool, "hash-3", "версия 1")
+    await repo.put_cached_llm(pool, "hash-3", "версия 2")
+
+    assert await repo.get_cached_llm(pool, "hash-3") == "версия 2"
+
+
+async def test_put_cached_llm_lazily_deletes_rows_older_than_48h(pool):
+    """put_cached_llm заодно чистит записи старше 48h (ленивая очистка, §7) — проверяем
+    побочный эффект другого вызова put_cached_llm, а не отдельную функцию очистки."""
+    await repo.put_cached_llm(pool, "hash-old", "будет удалено")
+    await pool.execute(
+        "UPDATE llm_cache SET created_at = now() - interval '49 hours' WHERE material_hash = $1",
+        "hash-old",
+    )
+
+    await repo.put_cached_llm(pool, "hash-new", "триггерит очистку")
+
+    row = await pool.fetchrow("SELECT 1 FROM llm_cache WHERE material_hash = $1", "hash-old")
+    assert row is None
+    # свежая запись (не старше 48h) очисткой не задета
+    assert await repo.get_cached_llm(pool, "hash-new") == "триггерит очистку"

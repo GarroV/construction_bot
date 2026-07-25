@@ -861,6 +861,104 @@ async def test_overview_on_empty_false_default_stays_silent_and_skips_overview(m
     repo_mocks.mark_digest_run.assert_awaited_once()
 
 
+# --- _summarize_cached: кэш LLM-выжимок по хэшу промпта (§7, TTL 24h) ---
+# Общая точка вызова summarize для _summarize_or_none и _summarize_overview_or_none.
+
+
+async def test_summarize_cached_hit_does_not_call_summarize(monkeypatch):
+    deps = make_deps(AsyncMock())
+    get_mock = AsyncMock(return_value="закэшированная выжимка")
+    put_mock = AsyncMock()
+    summarize_mock = AsyncMock()
+    monkeypatch.setattr(scheduler.repo, "get_cached_llm", get_mock)
+    monkeypatch.setattr(scheduler.repo, "put_cached_llm", put_mock)
+    monkeypatch.setattr(scheduler.llm, "summarize", summarize_mock)
+    errors: list[str] = []
+
+    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
+
+    assert result == "закэшированная выжимка"
+    summarize_mock.assert_not_awaited()
+    put_mock.assert_not_awaited()  # уже в кэше — перезаписывать нечего
+    get_mock.assert_awaited_once_with(deps.pool, llm.material_hash("промпт"))
+    assert not errors
+
+
+async def test_summarize_cached_miss_calls_summarize_and_caches(monkeypatch):
+    deps = make_deps(AsyncMock())
+    monkeypatch.setattr(scheduler.repo, "get_cached_llm", AsyncMock(return_value=None))
+    put_mock = AsyncMock()
+    monkeypatch.setattr(scheduler.repo, "put_cached_llm", put_mock)
+    summarize_mock = AsyncMock(return_value="свежая выжимка")
+    monkeypatch.setattr(scheduler.llm, "summarize", summarize_mock)
+    errors: list[str] = []
+
+    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
+
+    assert result == "свежая выжимка"
+    summarize_mock.assert_awaited_once()
+    put_mock.assert_awaited_once_with(deps.pool, llm.material_hash("промпт"), "свежая выжимка")
+    assert not errors
+
+
+async def test_summarize_cached_second_call_after_caching_is_a_hit(monkeypatch):
+    """Повторный вызов с тем же промптом после успешного кэширования первым вызовом — hit,
+    LLM во второй раз не дёргается."""
+    deps = make_deps(AsyncMock())
+    store: dict[str, str] = {}
+
+    async def fake_get(pool, material_hash):
+        return store.get(material_hash)
+
+    async def fake_put(pool, material_hash, text):
+        store[material_hash] = text
+
+    monkeypatch.setattr(scheduler.repo, "get_cached_llm", fake_get)
+    monkeypatch.setattr(scheduler.repo, "put_cached_llm", fake_put)
+    summarize_mock = AsyncMock(return_value="итоговая выжимка")
+    monkeypatch.setattr(scheduler.llm, "summarize", summarize_mock)
+    errors: list[str] = []
+
+    first = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
+    second = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
+
+    assert first == second == "итоговая выжимка"
+    summarize_mock.assert_awaited_once()
+
+
+async def test_summarize_cached_get_failure_still_generates(monkeypatch):
+    """Сбой самого кэша (БД глюкнула) не должен ломать генерацию — get/put в try/except,
+    работаем без кэша (§7)."""
+    deps = make_deps(AsyncMock())
+    monkeypatch.setattr(scheduler.repo, "get_cached_llm",
+                        AsyncMock(side_effect=RuntimeError("db boom")))
+    monkeypatch.setattr(scheduler.repo, "put_cached_llm",
+                        AsyncMock(side_effect=RuntimeError("db boom")))
+    summarize_mock = AsyncMock(return_value="выжимка несмотря на сбой кэша")
+    monkeypatch.setattr(scheduler.llm, "summarize", summarize_mock)
+    errors: list[str] = []
+
+    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
+
+    assert result == "выжимка несмотря на сбой кэша"
+    summarize_mock.assert_awaited_once()
+    assert not errors  # сбой кэша — не ошибка генерации, в errors не попадает
+
+
+async def test_summarize_cached_llm_unavailable_with_empty_cache_returns_none_with_error(monkeypatch):
+    deps = make_deps(AsyncMock())
+    monkeypatch.setattr(scheduler.repo, "get_cached_llm", AsyncMock(return_value=None))
+    monkeypatch.setattr(scheduler.repo, "put_cached_llm", AsyncMock())
+    monkeypatch.setattr(scheduler.llm, "summarize",
+                        AsyncMock(side_effect=llm.LlmUnavailable("недоступен")))
+    errors: list[str] = []
+
+    result = await scheduler._summarize_cached(deps, "промпт", errors, make_chat())
+
+    assert result is None
+    assert errors
+
+
 async def test_discovery_calls_list_subtasks_only_for_manual_cards(monkeypatch):
     chat = make_chat()
     auto_card = CardRow(

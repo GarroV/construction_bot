@@ -22,13 +22,15 @@ async def test_migrations_apply_and_are_idempotent(pool):
     applied_first = await apply_migrations(pool)
     applied_second = await apply_migrations(pool)
 
-    assert applied_first == ["0001_init.sql", "0002_last_comment_id.sql", "0003_auto_from.sql"]
+    assert applied_first == [
+        "0001_init.sql", "0002_last_comment_id.sql", "0003_auto_from.sql", "0004_llm_cache.sql",
+    ]
     assert applied_second == []  # повторный прогон ничего не применяет
     tables = {
         r["tablename"]
         for r in await pool.fetch("SELECT tablename FROM pg_tables WHERE schemaname='public'")
     }
-    assert {"chats", "cards", "cursors", "chat_admins", "schema_migrations"} <= tables
+    assert {"chats", "cards", "cursors", "chat_admins", "llm_cache", "schema_migrations"} <= tables
 
 
 async def test_chats_unique_treats_null_thread_as_equal(pool):

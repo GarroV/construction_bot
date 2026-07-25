@@ -215,3 +215,29 @@ async def mark_posted(pool, chat_id: int) -> None:
 
 async def mark_ping(pool, chat_id: int) -> None:
     await pool.execute("UPDATE chats SET last_ping_at = now() WHERE id = $1", chat_id)
+
+
+# --- Кэш LLM-выжимок (§7, миграция 0004): ключ — хэш промпта (src.digest.llm.material_hash).
+# TTL 24h — вторая страховка поверх того, что промпт и так меняется каждые сутки из-за {date}.
+
+
+async def get_cached_llm(pool, material_hash: str) -> str | None:
+    """None — и промах, и протухшая (>24h) запись: вызывающий в обоих случаях идёт за
+    свежей выжимкой к LLM."""
+    row = await pool.fetchrow(
+        "SELECT text FROM llm_cache WHERE material_hash = $1 "
+        "AND created_at > now() - interval '24 hours'",
+        material_hash,
+    )
+    return row["text"] if row else None
+
+
+async def put_cached_llm(pool, material_hash: str, text: str) -> None:
+    """UPSERT текущей записи + попутная ленивая очистка записей старше 48h (не отдельная
+    джоба — кэш маленький и пишется нечасто, обычного DELETE на каждой записи достаточно)."""
+    await pool.execute(
+        "INSERT INTO llm_cache (material_hash, text) VALUES ($1, $2) "
+        "ON CONFLICT (material_hash) DO UPDATE SET text = EXCLUDED.text, created_at = now()",
+        material_hash, text,
+    )
+    await pool.execute("DELETE FROM llm_cache WHERE created_at < now() - interval '48 hours'")

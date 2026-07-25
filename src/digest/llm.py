@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,6 +81,17 @@ def build_overview_prompt(template: str, overview: CardDelta, language: str, dat
         checklist_total=overview.checklist_total,
         comments="\n".join(_comment_line(m) for m in overview.comments) or "-",
     )
+
+
+def material_hash(prompt: str) -> str:
+    """Ключ кэша LLM-выжимок (§7): sha256 финального промпта, а не сырых полей дельты —
+    build_prompt/build_overview_prompt детерминированно включают в него ВСЁ сырьё
+    (комментарии, изменения, чек-лист, язык, шаблон), так что совпадение хэша означает
+    совпадение результата. `{date}` в промпте меняется каждые сутки — это уже само по
+    себе ограничивает жизнь кэша одним днём; TTL 24h на стороне репозитория (§12) —
+    вторая, независимая от содержимого промпта страховка (не единственный механизм
+    инвалидации, а подстраховка на случай, если дата в промпте вдруг перестанет меняться)."""
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
 def _is_client_error(e: Exception) -> bool:

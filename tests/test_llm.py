@@ -1,3 +1,4 @@
+import hashlib
 from unittest.mock import AsyncMock
 
 import httpx
@@ -162,3 +163,25 @@ async def test_summarize_uses_max_completion_tokens():
     assert "max_completion_tokens" in kwargs
     assert "max_tokens" not in kwargs
     assert kwargs["max_completion_tokens"] == llm._MAX_TOKENS
+
+
+# --- material_hash: ключ кэша LLM-выжимок (§7, кэш по хэшу сырья) ---
+
+
+def test_material_hash_is_deterministic():
+    prompt = llm.build_prompt(llm.load_prompt(), DELTA, language="ru", date_str="2026-07-21")
+
+    assert llm.material_hash(prompt) == llm.material_hash(prompt)
+
+
+def test_material_hash_changes_with_content():
+    """Промпт детерминированно включает всё сырьё — любое изменение (новый комментарий,
+    другая дата и т.п.) должно менять хэш, иначе кэш отдал бы устаревшую выжимку."""
+    base = llm.build_prompt(llm.load_prompt(), DELTA, language="ru", date_str="2026-07-21")
+    changed = llm.build_prompt(llm.load_prompt(), DELTA, language="ru", date_str="2026-07-22")
+
+    assert llm.material_hash(base) != llm.material_hash(changed)
+
+
+def test_material_hash_is_sha256_hex_digest():
+    assert llm.material_hash("привет") == hashlib.sha256("привет".encode("utf-8")).hexdigest()
