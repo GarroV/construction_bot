@@ -93,7 +93,7 @@ cp .env.example .env
 
 - `BITRIX_WEBHOOK_URL` — входящий вебхук Битрикс24 (`https://<portal>/rest/<user_id>/<token>/`).
 - `TELEGRAM_BOT_TOKEN` — токен бота от BotFather.
-- `OPENAI_API_KEY` / `OPENAI_MODEL` — доступ к LLM для выжимок (модель по умолчанию `gpt-5-mini`).
+- `OPENAI_API_KEY` / `OPENAI_MODEL` — доступ к LLM для выжимок (модель по умолчанию `gpt-5.6-terra` — не reasoning-модель: весь бюджет токенов идёт в текст выжимки, а не в скрытые рассуждения; так же, как в Sorum).
 - `POSTGRES_DSN` — строка подключения к Postgres (в `docker-compose.yml` — `postgres` как хост).
 - `SCHEDULER_TICK_MINUTES` — период тика планировщика (по умолчанию 5).
 - `DEFAULT_LANGUAGE` — язык нового чата до первого `/lang` (по умолчанию `ru`).
