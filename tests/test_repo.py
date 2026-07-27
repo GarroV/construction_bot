@@ -284,6 +284,51 @@ async def test_put_cached_llm_upsert_updates_existing_row(pool):
     assert await repo.get_cached_llm(pool, "hash-3") == "версия 2"
 
 
+# --- auto_configured (миграция 0005): автонастройка чата из карточки при первом /add (§5) ---
+
+
+async def test_new_chat_defaults_auto_configured_to_false(pool):
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+
+    assert chat.auto_configured is False
+
+
+async def test_set_auto_configured_flips_flag_to_true(pool):
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+
+    await repo.set_auto_configured(pool, chat.id, True)
+
+    fresh = (await repo.list_active_chats(pool))[0]
+    assert fresh.auto_configured is True
+
+
+async def test_set_auto_configured_can_be_reset_to_false(pool):
+    """Сеттер симметричен (value по умолчанию True, но принимает и False) — на случай
+    ручного сброса флага для повторной автонастройки."""
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    await repo.set_auto_configured(pool, chat.id, True)
+
+    await repo.set_auto_configured(pool, chat.id, False)
+
+    fresh = (await repo.list_active_chats(pool))[0]
+    assert fresh.auto_configured is False
+
+
+async def test_auto_configured_column_defaults_to_false_for_preexisting_rows(pool):
+    """Миграция 0005: ALTER TABLE ... ADD COLUMN auto_configured BOOLEAN NOT NULL
+    DEFAULT FALSE — прямая проверка через INSERT без указания колонки (как были бы
+    строки, заведённые до миграции)."""
+    await pool.execute(
+        "INSERT INTO chats (telegram_chat_id, message_thread_id, country, digest_language) "
+        "VALUES ($1, $2, $3, $4)",
+        -999, 7, "Тест", "ru",
+    )
+
+    fresh = (await repo.list_active_chats(pool))[0]
+
+    assert fresh.auto_configured is False
+
+
 async def test_put_cached_llm_lazily_deletes_rows_older_than_48h(pool):
     """put_cached_llm заодно чистит записи старше 48h (ленивая очистка, §7) — проверяем
     побочный эффект другого вызова put_cached_llm, а не отдельную функцию очистки."""

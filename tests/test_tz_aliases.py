@@ -1,6 +1,6 @@
 """resolve_tz: город/страна (ru/en) ИЛИ готовый IANA-идентификатор -> канонический
 IANA или None. Без сети и БД — чистые юнит-тесты."""
-from src.telegram.tz_aliases import TZ_ALIASES, resolve_tz
+from src.telegram.tz_aliases import TZ_ALIASES, is_valid_zone, resolve_tz
 
 
 def test_resolve_tz_exact_iana_returned_canonically():
@@ -110,3 +110,20 @@ def test_resolve_tz_covers_dodo_international_network_countries():
 def test_lowercase_utc_resolves():
     assert resolve_tz("utc") == "UTC"
     assert resolve_tz("gmt") == "UTC"
+
+
+# --- is_valid_zone: валидация готовой IANA-строки от LLM-детекта (§5 автонастройка) ---
+
+
+def test_is_valid_zone_accepts_canonical_iana():
+    assert is_valid_zone("Europe/Podgorica") is True
+    assert is_valid_zone("Asia/Bishkek") is True
+    assert is_valid_zone("UTC") is True
+
+
+def test_is_valid_zone_rejects_garbage_and_human_names():
+    """LLM детект отдаёт готовую IANA-строку (не человеческое название) — алиасы вроде
+    «белград» здесь НЕ резолвятся, это забота resolve_tz, не is_valid_zone."""
+    assert is_valid_zone("Mars/Olympus") is False
+    assert is_valid_zone("белград") is False
+    assert is_valid_zone("") is False

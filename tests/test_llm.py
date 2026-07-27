@@ -1,4 +1,5 @@
 import hashlib
+import json
 from unittest.mock import AsyncMock
 
 import httpx
@@ -185,6 +186,87 @@ def test_material_hash_changes_with_content():
 
 def test_material_hash_is_sha256_hex_digest():
     assert llm.material_hash("привет") == hashlib.sha256("привет".encode("utf-8")).hexdigest()
+
+
+# --- detect_card_locale: автонастройка чата из карточки при первом /add (§5) ---
+
+
+def _client_returning_json(payload: dict):
+    """Structured-output ответ: content — JSON-СТРОКА (как реально отдаёт OpenAI при
+    response_format=json_schema), не готовый dict."""
+    return _client_returning(json.dumps(payload))
+
+
+async def test_detect_card_locale_returns_ru_and_resolved_timezone():
+    client = _client_returning_json({"language": "ru", "timezone": "Europe/Podgorica"})
+
+    result = await llm.detect_card_locale(client, "gpt-5.6-terra", "Подгорица-2", ["Привет"])
+
+    assert result == ("ru", "Europe/Podgorica")
+
+
+async def test_detect_card_locale_returns_en_and_none_when_city_unclear():
+    """Пустая строка timezone (LLM не смог определить город) нормализуется в None."""
+    client = _client_returning_json({"language": "en", "timezone": ""})
+
+    result = await llm.detect_card_locale(client, "gpt-5.6-terra", "New Site", ["Hello"])
+
+    assert result == ("en", None)
+
+
+async def test_detect_card_locale_passes_json_schema_response_format():
+    client = _client_returning_json({"language": "ru", "timezone": ""})
+
+    await llm.detect_card_locale(client, "gpt-5.6-terra", "Белград 2", [])
+
+    _, kwargs = client.chat.completions.create.call_args
+    assert kwargs["response_format"]["type"] == "json_schema"
+    assert kwargs["response_format"]["json_schema"]["strict"] is True
+    assert kwargs["max_completion_tokens"] == llm._LOCALE_MAX_TOKENS
+
+
+async def test_detect_card_locale_retries_then_raises(monkeypatch):
+    monkeypatch.setattr(llm.asyncio, "sleep", AsyncMock())
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(side_effect=RuntimeError("api down"))
+
+    with pytest.raises(LlmUnavailable):
+        await llm.detect_card_locale(client, "gpt-5.6-terra", "Бишкек 8", [])
+    assert client.chat.completions.create.await_count == 3
+
+
+async def test_detect_card_locale_garbage_json_retries_then_raises(monkeypatch):
+    """Мусор вместо валидного JSON-ответа — не результат, а отказ (ретраим, как и
+    пустой content у summarize)."""
+    monkeypatch.setattr(llm.asyncio, "sleep", AsyncMock())
+    client = _client_returning("это не json")
+
+    with pytest.raises(LlmUnavailable):
+        await llm.detect_card_locale(client, "gpt-5.6-terra", "Бишкек 8", [])
+    assert client.chat.completions.create.await_count == 3
+
+
+async def test_detect_card_locale_invalid_language_enum_retries_then_raises(monkeypatch):
+    """language вне {'ru', 'en'} — тоже мусор, даже если JSON валиден."""
+    monkeypatch.setattr(llm.asyncio, "sleep", AsyncMock())
+    client = _client_returning_json({"language": "fr", "timezone": ""})
+
+    with pytest.raises(LlmUnavailable):
+        await llm.detect_card_locale(client, "gpt-5.6-terra", "Бишкек 8", [])
+    assert client.chat.completions.create.await_count == 3
+
+
+async def test_detect_card_locale_bad_request_fails_fast_without_retry(monkeypatch):
+    monkeypatch.setattr(llm.asyncio, "sleep", AsyncMock())
+    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    resp = httpx.Response(400, request=req, json={"error": {"message": "bad"}})
+    error = openai.BadRequestError("bad request", response=resp, body=None)
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(side_effect=error)
+
+    with pytest.raises(LlmUnavailable):
+        await llm.detect_card_locale(client, "gpt-5.6-terra", "Бишкек 8", [])
+    assert client.chat.completions.create.await_count == 1
 
 
 def test_checklist_state_text_variants():

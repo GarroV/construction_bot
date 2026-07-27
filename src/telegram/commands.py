@@ -8,11 +8,12 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from src import repo
-from src.bitrix import methods
+from src.bitrix import methods, parse
 from src.bitrix.client import BitrixError
+from src.digest import llm
 from src.i18n import t
 from src.telegram.capture import chat_title_of, thread_id_of
-from src.telegram.tz_aliases import resolve_tz
+from src.telegram.tz_aliases import is_valid_zone, resolve_tz
 
 log = logging.getLogger(__name__)
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
@@ -22,6 +23,12 @@ _LANG_RE = re.compile(r"^[a-z]{2}(-[a-z]{2})?$", re.IGNORECASE)
 # .../company/personal/user/1650/tasks/task/view/42103/ (бывает и .../workgroups/
 # group/25/tasks/task/view/42103/) — извлекаем ID регэкспом, префикс пути не важен.
 _TASK_URL_RE = re.compile(r"/tasks/task/view/(\d+)")
+# Автонастройка чата из карточки при первом /add (§5, дизайн владельца зафиксирован):
+# сырьё для LLM-детекта языка/таймзоны — не более 10 последних комментариев, каждый
+# обрезан до ~200 символов (нам нужен только язык/город обсуждения, не полный текст).
+_LOCALE_COMMENT_LIMIT = 10
+_LOCALE_COMMENT_TRUNCATE = 200
+_LOCALE_DIGEST_TIME = dt.time(9, 0)  # то же дефолтное время, что у автоопределения tz по названию чата
 
 
 def _parse_task_ref(text: str) -> int | None:
@@ -48,6 +55,49 @@ def resolve_empty_args_flow(cmd: str, args: str) -> str | None:
     if args.strip():
         return None
     return _EMPTY_ARGS_FLOWS.get(cmd)
+
+
+async def _collect_locale_comments(deps, task_id: int, bitrix_chat_id) -> list[str]:
+    """До `_LOCALE_COMMENT_LIMIT` последних комментариев карточки — сырьё для LLM-детекта
+    языка/таймзоны (§5). Та же ветка «есть чат задачи / нет чата», что и
+    `collector.collect_card_overview`, но нужен только текст (без файлов/чек-листа):
+    новая карточка -> `im.dialog.messages.get` (мгновенно свежие сообщения), старая
+    (нет `chatId`) -> `task.commentitem.getlist` с уже применённым `strip_bbcode`
+    (внутри `parse.parse_comments`)."""
+    if bitrix_chat_id:
+        raw_msgs, users = await methods.fetch_latest_chat_messages(
+            deps.bx, int(bitrix_chat_id), _LOCALE_COMMENT_LIMIT
+        )
+        comments = parse.parse_chat_messages(raw_msgs, users)
+    else:
+        raw_comments = await methods.fetch_latest_comments(
+            deps.bx, task_id, _LOCALE_COMMENT_LIMIT
+        )
+        comments = parse.parse_comments(raw_comments)
+    return [c.text[:_LOCALE_COMMENT_TRUNCATE] for c in comments]
+
+
+async def _auto_configure_from_card(
+    deps, chat, task_id: int, alias: str, bitrix_chat_id
+) -> None:
+    """Автонастройка чата из карточки при первом /add (владелец, дизайн зафиксирован):
+    ОДНИМ LLM-вызовом определяем язык (ru/en) обсуждения и таймзону города из названия
+    карточки, применяем их к чату. Тихая деградация: LLM недоступен/вернул мусор, сеть
+    или БД подвели — ловим здесь и логируем `warning`, `/add` не падает и не тормозит
+    сверх обычного, `auto_configured` остаётся False — попробуем на следующей карточке.
+    Ручная /lang или /time всегда побеждают (проверка `chat.auto_configured` — у
+    вызывающего, до этого вызова)."""
+    try:
+        comments = await _collect_locale_comments(deps, task_id, bitrix_chat_id)
+        language, timezone = await llm.detect_card_locale(
+            deps.llm_client, deps.settings.openai_model, alias, comments,
+        )
+        await repo.set_chat_language(deps.pool, chat.id, language)
+        if timezone and is_valid_zone(timezone):
+            await repo.set_chat_time(deps.pool, chat.id, _LOCALE_DIGEST_TIME, timezone)
+        await repo.set_auto_configured(deps.pool, chat.id, True)
+    except Exception as e:
+        log.warning("автонастройка чата %s из карточки #%s не удалась: %s", chat.id, task_id, e)
 
 
 async def handle_add(deps, chat, args: str, user_id: int) -> str:
@@ -79,6 +129,8 @@ async def handle_add(deps, chat, args: str, user_id: int) -> str:
         deps.pool, chat.id, task_id, alias, user_id,
         last_history_id, last_message_id, last_comment_id,
     )
+    if chat.auto_configured is False:
+        await _auto_configure_from_card(deps, chat, task_id, alias, bitrix_chat_id)
     key = {"added": "add_ok", "exists": "add_exists", "reactivated": "add_reactivated"}[outcome]
     return t(deps.locales, lang, key, alias=alias, task_id=task_id)
 
@@ -130,6 +182,8 @@ async def handle_lang(deps, chat, args: str) -> str:
     if not _LANG_RE.match(code):
         return t(deps.locales, chat.digest_language, "lang_usage")
     await repo.set_chat_language(deps.pool, chat.id, code)
+    # §5: ручная настройка навсегда побеждает автоопределение из карточки при /add.
+    await repo.set_auto_configured(deps.pool, chat.id, True)
     return t(deps.locales, code, "lang_ok", code=code)
 
 
@@ -153,6 +207,8 @@ async def handle_time(deps, chat, args: str) -> str:
         return t(deps.locales, lang, "time_need_tz", time=parts[0])
 
     await repo.set_chat_time(deps.pool, chat.id, new_time, tz)
+    # §5: ручная настройка навсегда побеждает автоопределение из карточки при /add.
+    await repo.set_auto_configured(deps.pool, chat.id, True)
     return t(deps.locales, lang, "time_ok", time=parts[0], tz=tz or chat.timezone)
 
 

@@ -180,3 +180,11 @@ def resolve_tz(text: str) -> str | None:
     if stripped in _VALID_ZONES:
         return stripped
     return TZ_ALIASES.get(stripped.casefold())
+
+
+def is_valid_zone(tz: str) -> bool:
+    """Точная (регистрозависимая, независимая от файловой системы) проверка, что `tz` —
+    канонический IANA-идентификатор. Нужна автонастройке из карточки (§5): LLM-детект
+    возвращает готовую IANA-строку (не человеческое название города), поэтому здесь не
+    `resolve_tz` (который умеет и алиасы), а прямая сверка с `available_timezones()`."""
+    return tz in _VALID_ZONES

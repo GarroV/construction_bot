@@ -22,8 +22,11 @@ def make_deps(**over):
     return deps
 
 
+# auto_configured=True — большинство тестов ниже не про автонастройку из карточки (§5) и
+# не поднимают llm_client/фейковые бб-комментарии; True гасит новую ветку в handle_add,
+# как и было бы в реальности у чата, где /lang или /time уже вызывались хоть раз.
 CHAT = SimpleNamespace(id=1, digest_language="ru", timezone="UTC",
-                       digest_time=dt.time(9, 0), restricted=False)
+                       digest_time=dt.time(9, 0), restricted=False, auto_configured=True)
 
 
 def _chat_row(**over):
@@ -34,6 +37,7 @@ def _chat_row(**over):
         digest_language="ru", digest_time=dt.time(9, 0), timezone="UTC",
         last_digest_date=None, last_posted_at=None, last_ping_at=None,
         restricted=False, active=True, created_at=dt.datetime(2026, 1, 1),
+        auto_configured=True,
     )
     base.update(over)
     return ChatRow(**base)
@@ -124,6 +128,179 @@ async def test_add_with_full_task_url_extracts_id(monkeypatch):
     add_card.assert_awaited_once_with(deps.pool, 1, 42103, "Бишкек 8", 555, 100, 200, 0)
 
 
+# --- Автонастройка чата из карточки при первом /add (§5, дизайн владельца зафиксирован):
+# язык (ru/en) и таймзона города через один LLM-вызов; ручное /lang//time побеждает навсегда.
+
+CHAT_UNCONFIGURED = SimpleNamespace(id=1, digest_language="ru", timezone="UTC",
+                                    digest_time=dt.time(9, 0), restricted=False,
+                                    auto_configured=False)
+
+
+def _autoconfigure_deps(**settings_over):
+    settings = SimpleNamespace(default_language="ru", openai_model="gpt-5.6-terra")
+    for k, v in settings_over.items():
+        setattr(settings, k, v)
+    return make_deps(llm_client=object(), settings=settings)
+
+
+async def test_add_autoconfigures_language_and_timezone_from_new_card(monkeypatch):
+    """§5: первый /add на чате без auto_configured детектит язык и таймзону ОДНИМ
+    LLM-вызовом и применяет их к чату. Новая карточка (есть chatId) — комментарии для
+    детекта берутся через im.dialog.messages.get (fetch_latest_chat_messages)."""
+    deps = _autoconfigure_deps()
+    monkeypatch.setattr(commands.methods, "get_task",
+                        AsyncMock(return_value={"title": "Podgorica-2", "chatId": 42}))
+    monkeypatch.setattr(commands.methods, "get_latest_history_id", AsyncMock(return_value=100))
+    monkeypatch.setattr(commands.methods, "get_latest_chat_message_id", AsyncMock(return_value=200))
+    monkeypatch.setattr(commands.methods, "get_latest_comment_id", AsyncMock(return_value=0))
+    monkeypatch.setattr(commands.repo, "add_card", AsyncMock(return_value="added"))
+    fetch_chat_msgs = AsyncMock(return_value=([{"id": 1}], {}))
+    monkeypatch.setattr(commands.methods, "fetch_latest_chat_messages", fetch_chat_msgs)
+    monkeypatch.setattr(commands.parse, "parse_chat_messages",
+                        lambda raw, users: [SimpleNamespace(text="Хорошо, договорились")])
+    detect = AsyncMock(return_value=("ru", "Europe/Podgorica"))
+    monkeypatch.setattr(commands.llm, "detect_card_locale", detect)
+    set_lang = AsyncMock()
+    set_time = AsyncMock()
+    set_auto = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_chat_language", set_lang)
+    monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+    monkeypatch.setattr(commands.repo, "set_auto_configured", set_auto)
+
+    reply = await commands.handle_add(deps, CHAT_UNCONFIGURED, "8017", user_id=555)
+
+    assert "Podgorica-2" in reply  # /add ответ как обычно, без доп. сообщений
+    fetch_chat_msgs.assert_awaited_once_with(deps.bx, 42, commands._LOCALE_COMMENT_LIMIT)
+    detect.assert_awaited_once_with(
+        deps.llm_client, deps.settings.openai_model, "Podgorica-2", ["Хорошо, договорились"]
+    )
+    set_lang.assert_awaited_once_with(deps.pool, 1, "ru")
+    set_time.assert_awaited_once_with(deps.pool, 1, dt.time(9, 0), "Europe/Podgorica")
+    set_auto.assert_awaited_once_with(deps.pool, 1, True)
+
+
+async def test_add_autoconfigure_skipped_when_already_configured(monkeypatch):
+    """auto_configured=True (ручная /lang или /time уже была, либо детект уже удался
+    на прошлой карточке) -> детект НЕ вызывается вовсе."""
+    deps = make_deps()
+    monkeypatch.setattr(commands.methods, "get_task",
+                        AsyncMock(return_value={"title": "Бишкек 8", "chatId": 42}))
+    monkeypatch.setattr(commands.methods, "get_latest_history_id", AsyncMock(return_value=100))
+    monkeypatch.setattr(commands.methods, "get_latest_chat_message_id", AsyncMock(return_value=200))
+    monkeypatch.setattr(commands.methods, "get_latest_comment_id", AsyncMock(return_value=0))
+    monkeypatch.setattr(commands.repo, "add_card", AsyncMock(return_value="added"))
+    detect = AsyncMock()
+    monkeypatch.setattr(commands.llm, "detect_card_locale", detect)
+
+    await commands.handle_add(deps, CHAT, "8017", user_id=555)  # CHAT.auto_configured=True
+
+    detect.assert_not_awaited()
+
+
+async def test_add_autoconfigure_llm_failure_keeps_add_ok_and_settings_untouched(monkeypatch):
+    """Тихая деградация (владелец): LLM недоступен/вернул мусор -> /add всё равно
+    возвращает обычный add_ok, настройки чата не меняются вовсе (auto_configured
+    остаётся False — новая попытка на следующей карточке)."""
+    deps = _autoconfigure_deps()
+    monkeypatch.setattr(commands.methods, "get_task",
+                        AsyncMock(return_value={"title": "Бишкек 8", "chatId": 42}))
+    monkeypatch.setattr(commands.methods, "get_latest_history_id", AsyncMock(return_value=100))
+    monkeypatch.setattr(commands.methods, "get_latest_chat_message_id", AsyncMock(return_value=200))
+    monkeypatch.setattr(commands.methods, "get_latest_comment_id", AsyncMock(return_value=0))
+    monkeypatch.setattr(commands.repo, "add_card", AsyncMock(return_value="added"))
+    monkeypatch.setattr(commands.methods, "fetch_latest_chat_messages",
+                        AsyncMock(return_value=([], {})))
+    monkeypatch.setattr(commands.parse, "parse_chat_messages", lambda raw, users: [])
+    monkeypatch.setattr(commands.llm, "detect_card_locale",
+                        AsyncMock(side_effect=commands.llm.LlmUnavailable("недоступен")))
+    set_lang = AsyncMock()
+    set_time = AsyncMock()
+    set_auto = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_chat_language", set_lang)
+    monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+    monkeypatch.setattr(commands.repo, "set_auto_configured", set_auto)
+
+    reply = await commands.handle_add(deps, CHAT_UNCONFIGURED, "8017", user_id=555)
+
+    assert "Бишкек 8" in reply and "8017" in reply  # add_ok, а не падение
+    set_lang.assert_not_awaited()
+    set_time.assert_not_awaited()
+    set_auto.assert_not_awaited()
+
+
+async def test_add_autoconfigure_invalid_timezone_from_llm_is_skipped(monkeypatch):
+    """LLM вернул несуществующую IANA-зону (город не в tzdata) — set_chat_time не
+    вызывается, но язык и auto_configured применяются (сам детект в целом успешен).
+    Заодно проверяет ветку старой карточки без chatId (task.commentitem.getlist)."""
+    deps = _autoconfigure_deps()
+    monkeypatch.setattr(commands.methods, "get_task",
+                        AsyncMock(return_value={"title": "Тестовая стройка"}))  # нет chatId
+    monkeypatch.setattr(commands.methods, "get_latest_history_id", AsyncMock(return_value=100))
+    monkeypatch.setattr(commands.methods, "get_latest_chat_message_id", AsyncMock(return_value=0))
+    monkeypatch.setattr(commands.methods, "get_latest_comment_id", AsyncMock(return_value=0))
+    monkeypatch.setattr(commands.repo, "add_card", AsyncMock(return_value="added"))
+    fetch_comments = AsyncMock(return_value=[])
+    monkeypatch.setattr(commands.methods, "fetch_latest_comments", fetch_comments)
+    monkeypatch.setattr(commands.parse, "parse_comments", lambda raw: [])
+    monkeypatch.setattr(commands.llm, "detect_card_locale",
+                        AsyncMock(return_value=("en", "Mars/Olympus")))
+    set_lang = AsyncMock()
+    set_time = AsyncMock()
+    set_auto = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_chat_language", set_lang)
+    monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+    monkeypatch.setattr(commands.repo, "set_auto_configured", set_auto)
+
+    await commands.handle_add(deps, CHAT_UNCONFIGURED, "9001", user_id=1)
+
+    fetch_comments.assert_awaited_once_with(deps.bx, 9001, commands._LOCALE_COMMENT_LIMIT)
+    set_lang.assert_awaited_once_with(deps.pool, 1, "en")
+    set_time.assert_not_awaited()
+    set_auto.assert_awaited_once_with(deps.pool, 1, True)
+
+
+async def test_add_autoconfigure_empty_timezone_from_llm_skips_set_chat_time(monkeypatch):
+    """LLM не смог определить город (timezone=None после нормализации в llm.py) —
+    set_chat_time не вызывается, язык и auto_configured всё равно применяются."""
+    deps = _autoconfigure_deps()
+    monkeypatch.setattr(commands.methods, "get_task",
+                        AsyncMock(return_value={"title": "Стройка без города", "chatId": 7}))
+    monkeypatch.setattr(commands.methods, "get_latest_history_id", AsyncMock(return_value=0))
+    monkeypatch.setattr(commands.methods, "get_latest_chat_message_id", AsyncMock(return_value=0))
+    monkeypatch.setattr(commands.methods, "get_latest_comment_id", AsyncMock(return_value=0))
+    monkeypatch.setattr(commands.repo, "add_card", AsyncMock(return_value="added"))
+    monkeypatch.setattr(commands.methods, "fetch_latest_chat_messages",
+                        AsyncMock(return_value=([], {})))
+    monkeypatch.setattr(commands.parse, "parse_chat_messages", lambda raw, users: [])
+    monkeypatch.setattr(commands.llm, "detect_card_locale", AsyncMock(return_value=("en", None)))
+    set_lang = AsyncMock()
+    set_time = AsyncMock()
+    set_auto = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_chat_language", set_lang)
+    monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+    monkeypatch.setattr(commands.repo, "set_auto_configured", set_auto)
+
+    await commands.handle_add(deps, CHAT_UNCONFIGURED, "4242", user_id=1)
+
+    set_lang.assert_awaited_once_with(deps.pool, 1, "en")
+    set_time.assert_not_awaited()
+    set_auto.assert_awaited_once_with(deps.pool, 1, True)
+
+
+async def test_collect_locale_comments_truncates_and_limits(monkeypatch):
+    """Сырьё для LLM-детекта — не более _LOCALE_COMMENT_LIMIT комментариев, каждый
+    обрезан до _LOCALE_COMMENT_TRUNCATE символов (реальный parse.parse_comments, не мок —
+    strip_bbcode применяется по дороге)."""
+    deps = make_deps()
+    raw = [{"ID": i, "AUTHOR_NAME": "Иван", "POST_MESSAGE": "x" * 300} for i in range(1, 4)]
+    monkeypatch.setattr(commands.methods, "fetch_latest_comments", AsyncMock(return_value=raw))
+
+    result = await commands._collect_locale_comments(deps, 8017, None)
+
+    assert len(result) == 3
+    assert all(len(text) == commands._LOCALE_COMMENT_TRUNCATE for text in result)
+
+
 async def test_remove_and_list(monkeypatch):
     deps = make_deps()
     monkeypatch.setattr(commands.repo, "deactivate_card", AsyncMock(return_value=False))
@@ -156,6 +333,8 @@ async def test_time_validation(monkeypatch):
     deps = make_deps()
     set_time = AsyncMock()
     monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+    set_auto = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_auto_configured", set_auto)
 
     assert "Использование" in await commands.handle_time(deps, CHAT, "9:99 Asia/Bishkek")
     assert "Использование" in await commands.handle_time(deps, CHAT, "09:00 Mars/Olympus")
@@ -165,6 +344,8 @@ async def test_time_validation(monkeypatch):
     ok = await commands.handle_time(deps, CHAT, "09:00 Asia/Bishkek")
     assert "09:00" in ok and "Asia/Bishkek" in ok
     set_time.assert_awaited_once_with(deps.pool, 1, dt.time(9, 0), "Asia/Bishkek")
+    # только успешный вызов ставит auto_configured — три invalid-попытки выше его не задели
+    set_auto.assert_awaited_once_with(deps.pool, 1, True)
 
 
 async def test_time_accepts_city_name(monkeypatch):
@@ -173,6 +354,7 @@ async def test_time_accepts_city_name(monkeypatch):
     deps = make_deps()
     set_time = AsyncMock()
     monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+    monkeypatch.setattr(commands.repo, "set_auto_configured", AsyncMock())
 
     ok = await commands.handle_time(deps, CHAT, "09:00 белград")
 
@@ -184,6 +366,7 @@ async def test_time_still_accepts_iana_tz_directly(monkeypatch):
     deps = make_deps()
     set_time = AsyncMock()
     monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+    monkeypatch.setattr(commands.repo, "set_auto_configured", AsyncMock())
 
     ok = await commands.handle_time(deps, CHAT, "09:00 Europe/Belgrade")
 
@@ -195,21 +378,42 @@ async def test_time_unresolvable_city_falls_back_to_usage(monkeypatch):
     deps = make_deps()
     set_time = AsyncMock()
     monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+    set_auto = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_auto_configured", set_auto)
 
     reply = await commands.handle_time(deps, CHAT, "09:00 нарния")
 
     assert "Использование" in reply
     set_time.assert_not_awaited()
+    set_auto.assert_not_awaited()  # невалидный ввод не должен блокировать будущую автонастройку
+
+
+async def test_time_sets_auto_configured_to_block_future_card_autodetect(monkeypatch):
+    """§5: ручная /time всегда побеждает будущее автоопределение из карточки — флаг
+    ставится сразу после успешного применения."""
+    deps = make_deps()
+    monkeypatch.setattr(commands.repo, "set_chat_time", AsyncMock())
+    set_auto = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_auto_configured", set_auto)
+
+    await commands.handle_time(deps, CHAT, "09:00 Asia/Bishkek")
+
+    set_auto.assert_awaited_once_with(deps.pool, 1, True)
 
 
 async def test_lang(monkeypatch):
     deps = make_deps()
     set_lang = AsyncMock()
     monkeypatch.setattr(commands.repo, "set_chat_language", set_lang)
+    set_auto = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_auto_configured", set_auto)
 
     assert "Использование" in await commands.handle_lang(deps, CHAT, "russian!")
     assert "ru" in await commands.handle_lang(deps, CHAT, "ru")
     set_lang.assert_awaited_once_with(deps.pool, 1, "ru")
+    # только успешный вызов ставит auto_configured (§5: ручная настройка навсегда
+    # побеждает автоопределение из карточки при /add) — invalid-попытка его не задела
+    set_auto.assert_awaited_once_with(deps.pool, 1, True)
 
 
 async def test_membership_kicked_deactivates_chats(monkeypatch):

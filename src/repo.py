@@ -5,7 +5,8 @@ import asyncpg
 
 _CHAT_COLS = (
     "id, country, telegram_chat_id, message_thread_id, digest_language, digest_time, "
-    "timezone, last_digest_date, last_posted_at, last_ping_at, restricted, active, created_at"
+    "timezone, last_digest_date, last_posted_at, last_ping_at, restricted, active, created_at, "
+    "auto_configured"
 )
 
 
@@ -24,6 +25,10 @@ class ChatRow:
     restricted: bool
     active: bool
     created_at: dt.datetime
+    # False -> следующий /add ещё может автонастроить язык+таймзону из карточки (§5);
+    # ручная /lang или /time СРАЗУ ставит True — ручная настройка навсегда побеждает
+    # автоопределение (миграция 0005).
+    auto_configured: bool = False
 
 
 @dataclass(frozen=True)
@@ -92,6 +97,13 @@ async def set_chat_time(pool, chat_id: int, digest_time: dt.time, timezone: str 
             "UPDATE chats SET digest_time = $2, timezone = $3 WHERE id = $1",
             chat_id, digest_time, timezone,
         )
+
+
+async def set_auto_configured(pool, chat_id: int, value: bool = True) -> None:
+    """§5: ручная /lang или /time СРАЗУ ставит True (побеждает автоопределение навсегда);
+    автонастройка из карточки при первом /add тоже ставит True после успешного детекта —
+    оба пути идут через один и тот же сеттер."""
+    await pool.execute("UPDATE chats SET auto_configured = $2 WHERE id = $1", chat_id, value)
 
 
 async def update_chat_telegram_id(pool, chat_id: int, new_telegram_chat_id: int) -> None:
