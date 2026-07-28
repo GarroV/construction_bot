@@ -225,6 +225,34 @@ async def test_detect_card_locale_passes_json_schema_response_format():
     assert kwargs["max_completion_tokens"] == llm._LOCALE_MAX_TOKENS
 
 
+async def test_detect_card_locale_ignores_latin_title_and_author_names_for_language():
+    """Живой кейс Черногории (фидбек владельца): карточка «Podgorica-2» и авторы
+    комментариев латиницей («Cheredanova Kristina», «Юрьев Вадим»), но обсуждение по
+    существу на русском — язык определяется СТРОГО по тексту комментариев, название
+    карточки используется только для таймзоны. Проверяем не только итог (модель тут
+    замокана и всегда вернёт то, что скажем), а что промпт, реально переданный в
+    client.chat.completions.create, явно инструктирует игнорировать язык названия и
+    имён авторов — иначе на реальной модели язык латиницы в title/авторах мог бы
+    перебить язык обсуждения."""
+    client = _client_returning_json({"language": "ru", "timezone": "Europe/Podgorica"})
+    comments = [
+        "Cheredanova Kristina -> Плитку привезли, монтаж начнём завтра",
+        "Юрьев Вадим -> Согласовано, работаем по графику",
+    ]
+
+    result = await llm.detect_card_locale(client, "gpt-5.6-terra", "Podgorica-2", comments)
+
+    assert result == ("ru", "Europe/Podgorica")
+    _, kwargs = client.chat.completions.create.call_args
+    prompt = kwargs["messages"][0]["content"]
+    assert "Podgorica-2" in prompt  # название всё ещё в промпте (нужно для timezone)
+    assert "Cheredanova Kristina" in prompt  # и текст комментариев с именем автора
+    # но промпт явно велит игнорировать язык названия/имён при определении language
+    assert "не по названию карточки и не по именам авторов" in prompt
+    assert "Игнорируй язык названия" in prompt
+    assert "ТОЛЬКО для timezone, язык из него не определяй" in prompt
+
+
 async def test_detect_card_locale_retries_then_raises(monkeypatch):
     monkeypatch.setattr(llm.asyncio, "sleep", AsyncMock())
     client = AsyncMock()

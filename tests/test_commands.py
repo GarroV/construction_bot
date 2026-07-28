@@ -228,6 +228,42 @@ async def test_add_autoconfigure_llm_failure_keeps_add_ok_and_settings_untouched
     set_auto.assert_not_awaited()
 
 
+async def test_add_autoconfigure_db_failure_after_detect_keeps_add_ok_and_flag_false(monkeypatch):
+    """Ревью: детект LLM прошёл успешно (язык+таймзона определены), но применение к БД
+    подводит (`set_chat_time` кидает исключение, например обрыв соединения) — /add
+    всё равно должен вернуть обычный add_ok, а `auto_configured` НЕ должен выставиться
+    в True: `set_auto_configured` стоит ПОСЛЕ `set_chat_time` внутри одного try/except
+    в `_auto_configure_from_card`, так что исключение из set_chat_time обрывает функцию
+    до вызова set_auto_configured — флаг остаётся False, следующий /add повторит
+    попытку целиком (см. фикс доков §5/§12: TRUE ставится только при полном успехе)."""
+    deps = _autoconfigure_deps()
+    monkeypatch.setattr(commands.methods, "get_task",
+                        AsyncMock(return_value={"title": "Podgorica-2", "chatId": 42}))
+    monkeypatch.setattr(commands.methods, "get_latest_history_id", AsyncMock(return_value=100))
+    monkeypatch.setattr(commands.methods, "get_latest_chat_message_id", AsyncMock(return_value=200))
+    monkeypatch.setattr(commands.methods, "get_latest_comment_id", AsyncMock(return_value=0))
+    monkeypatch.setattr(commands.repo, "add_card", AsyncMock(return_value="added"))
+    monkeypatch.setattr(commands.methods, "fetch_latest_chat_messages",
+                        AsyncMock(return_value=([{"id": 1}], {})))
+    monkeypatch.setattr(commands.parse, "parse_chat_messages",
+                        lambda raw, users: [SimpleNamespace(text="Согласовано, работаем")])
+    monkeypatch.setattr(commands.llm, "detect_card_locale",
+                        AsyncMock(return_value=("ru", "Europe/Podgorica")))
+    set_lang = AsyncMock()
+    set_time = AsyncMock(side_effect=RuntimeError("БД недоступна"))
+    set_auto = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_chat_language", set_lang)
+    monkeypatch.setattr(commands.repo, "set_chat_time", set_time)
+    monkeypatch.setattr(commands.repo, "set_auto_configured", set_auto)
+
+    reply = await commands.handle_add(deps, CHAT_UNCONFIGURED, "8017", user_id=555)
+
+    assert "Podgorica-2" in reply and "8017" in reply  # add_ok, а не падение
+    set_lang.assert_awaited_once_with(deps.pool, 1, "ru")  # успел выполниться до сбоя
+    set_time.assert_awaited_once_with(deps.pool, 1, dt.time(9, 0), "Europe/Podgorica")
+    set_auto.assert_not_awaited()  # не выставлен — следующий /add повторит попытку
+
+
 async def test_add_autoconfigure_invalid_timezone_from_llm_is_skipped(monkeypatch):
     """LLM вернул несуществующую IANA-зону (город не в tzdata) — set_chat_time не
     вызывается, но язык и auto_configured применяются (сам детект в целом успешен).
