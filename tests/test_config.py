@@ -14,7 +14,7 @@ def test_settings_from_env(monkeypatch):
     assert s.bitrix_webhook_url == "https://portal.bitrix24.ru/rest/123/abc/"
     assert s.openai_model == "gpt-5.6-terra"       # дефолт
     assert s.scheduler_tick_minutes == 5           # дефолт
-    assert s.default_language == "ru"              # дефолт
+    assert s.default_language == "en"              # дефолт (первый контакт по-английски; detect ru → переключит)
     assert s.weekly_ping_days == 7                 # дефолт
     assert s.admin_chat_id == 100500
     assert s.dry_run is True

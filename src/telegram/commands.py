@@ -146,15 +146,20 @@ async def handle_remove(deps, chat, args: str) -> str:
 
 
 def _addressed_to_me(message, bot_username: str) -> bool:
-    """Строгая адресация в группах: без @username команду игнорируем (в чате могут
-    жить другие боты со своей /add). В личке адресация не нужна. Если username
-    неизвестен (bot_username пуст) — ведём себя как раньше, не молчим."""
+    """Адресация команд в группах. Игнорируем команду, ТОЛЬКО если она явно адресована
+    ДРУГОМУ боту (`/add@other_bot`) — её обработает он, не мы. Команду без @-адресации
+    (`/add <ссылка>`) считаем своей: пока бот в чате один, требовать `@username` — лишнее
+    трение (партнёр по инструкции шлёт просто `/add <ссылка>`). Появится второй бот с
+    конфликтующей /add — вернём строгую адресацию. В личке адресация не нужна; username
+    неизвестен (bot_username пуст) — не молчим."""
     if not bot_username:
         return True
     chat_type = getattr(getattr(message, "chat", None), "type", "private")
     if chat_type == "private":
         return True
     first_word = ((message.text or "").split() or [""])[0]
+    if "@" not in first_word:
+        return True  # без @-адресации — наша команда
     return first_word.lower().endswith(f"@{bot_username.lower()}")
 
 

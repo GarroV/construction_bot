@@ -620,7 +620,7 @@ def test_addressed_to_me_rules():
                                   text="/add@other_bot 42103")
     private = SimpleNamespace(chat=SimpleNamespace(type="private"), text="/add 42103")
 
-    assert commands._addressed_to_me(group, "dodo_construction_bot") is False
+    assert commands._addressed_to_me(group, "dodo_construction_bot") is True  # без @ — наша команда
     assert commands._addressed_to_me(group_addr, "dodo_construction_bot") is True
     assert commands._addressed_to_me(group_other, "dodo_construction_bot") is False
     assert commands._addressed_to_me(private, "dodo_construction_bot") is True

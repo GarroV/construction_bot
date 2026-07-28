@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5.6-terra"
     postgres_dsn: str
     scheduler_tick_minutes: int = 5
-    default_language: str = "ru"
+    default_language: str = "en"
     admin_chat_id: int | None = None
     weekly_ping_days: int = 7
     dry_run: bool = False
