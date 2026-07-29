@@ -10,6 +10,7 @@ async def collect_card_delta(bx, card: CardRow, cursor: CursorRow) -> CardDelta:
     task = await methods.get_task(bx, card.bitrix_task_id)
     bitrix_chat_id = task.get("chatId") or (task.get("chat") or {}).get("id")
 
+    attachments: tuple = ()
     if bitrix_chat_id:
         raw_msgs, users = await methods.fetch_new_chat_messages(
             bx, int(bitrix_chat_id), cursor.last_message_id
@@ -24,18 +25,22 @@ async def collect_card_delta(bx, card: CardRow, cursor: CursorRow) -> CardDelta:
         # комментарии читаем через task.commentitem.getlist. Файлы — без disk.file.get
         # (ACCESS_DENIED на файлах старых карточек, см. extract_comment_files); вместо прямой
         # ссылки на файл строим ссылку на комментарий-источник (§8 фича 2, links.comment_url).
+        # attachments (§8, пересылка): сырые DOWNLOAD_URL/SIZE — ТОЛЬКО для загрузчика,
+        # в FileLink.url (партнёру) идёт исключительно ссылка на комментарий.
         raw_comments = await methods.fetch_new_comments(
             bx, card.bitrix_task_id, cursor.last_comment_id
         )
         comments = parse.parse_comments(raw_comments)
+        attached = parse.extract_comment_files(raw_comments)
         files = [
             links.FileLink(
-                name=name,
+                name=a.name,
                 url=links.comment_url(bx.webhook_url, bx.webhook_user_id,
-                                      card.bitrix_task_id, comment_id),
+                                      card.bitrix_task_id, a.comment_id),
             )
-            for name, comment_id in parse.extract_comment_files(raw_comments)
+            for a in attached
         ]
+        attachments = tuple(attached)
         new_message_id = cursor.last_message_id
         new_comment_id = max(
             (int(r["ID"]) for r in raw_comments), default=cursor.last_comment_id
@@ -58,6 +63,7 @@ async def collect_card_delta(bx, card: CardRow, cursor: CursorRow) -> CardDelta:
         stage_done=summary.stage_done,
         stage_total=summary.stage_total,
         has_stages=summary.has_stages,
+        attachments=attachments,
     )
 
 
@@ -77,6 +83,7 @@ async def collect_card_overview(bx, card: CardRow, cursor: CursorRow, k: int = _
     task = await methods.get_task(bx, card.bitrix_task_id)
     bitrix_chat_id = task.get("chatId") or (task.get("chat") or {}).get("id")
 
+    attachments: tuple = ()
     if bitrix_chat_id:
         raw_msgs, users = await methods.fetch_latest_chat_messages(bx, int(bitrix_chat_id), k)
         comments = parse.parse_chat_messages(raw_msgs, users)
@@ -84,17 +91,20 @@ async def collect_card_overview(bx, card: CardRow, cursor: CursorRow, k: int = _
         files = await links.resolve_files(bx, file_ids) if file_ids else []
     else:
         # Старая карточка (§13 fallback) — та же логика источника файлов, что и в
-        # collect_card_delta: ссылка на комментарий-источник, не на сам файл.
+        # collect_card_delta: ссылка на комментарий-источник, не на сам файл; attachments
+        # (§8, пересылка) — сырые DOWNLOAD_URL/SIZE только для загрузчика.
         raw_comments = await methods.fetch_latest_comments(bx, card.bitrix_task_id, k)
         comments = parse.parse_comments(raw_comments)
+        attached = parse.extract_comment_files(raw_comments)
         files = [
             links.FileLink(
-                name=name,
+                name=a.name,
                 url=links.comment_url(bx.webhook_url, bx.webhook_user_id,
-                                      card.bitrix_task_id, comment_id),
+                                      card.bitrix_task_id, a.comment_id),
             )
-            for name, comment_id in parse.extract_comment_files(raw_comments)
+            for a in attached
         ]
+        attachments = tuple(attached)
 
     summary = await methods.get_checklist_summary(bx, card.bitrix_task_id)
 
@@ -113,4 +123,5 @@ async def collect_card_overview(bx, card: CardRow, cursor: CursorRow, k: int = _
         stage_done=summary.stage_done,
         stage_total=summary.stage_total,
         has_stages=summary.has_stages,
+        attachments=attachments,
     )

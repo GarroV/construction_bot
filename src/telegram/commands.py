@@ -182,6 +182,18 @@ async def handle_list(deps, chat) -> str:
     return "\n".join(lines)
 
 
+async def handle_files(deps, chat, args: str) -> str:
+    """/files on|off (§8) — per-country пересылка файлов-вложений СОДЕРЖИМЫМ в чат
+    (sendDocument), как handle_lang по структуре валидации. НЕ ставит auto_configured —
+    независимый флаг, не связан с автонастройкой языка/таймзоны из карточки (§5)."""
+    value = args.strip().lower()
+    if value not in ("on", "off"):
+        return t(deps.locales, chat.digest_language, "files_usage")
+    enabled = value == "on"
+    await repo.set_attach_files(deps.pool, chat.id, enabled)
+    return t(deps.locales, chat.digest_language, "files_on" if enabled else "files_off")
+
+
 async def handle_lang(deps, chat, args: str) -> str:
     code = args.strip().lower()
     if not _LANG_RE.match(code):
@@ -329,7 +341,9 @@ def build_router(deps) -> Router:
                 # отсюда же на уровне модуля — импорт на уровне модуля дал бы цикл.
                 from src.telegram.menu import build_panel_keyboard
                 await message.reply(
-                    text, reply_markup=build_panel_keyboard(deps.locales, chat.digest_language)
+                    text, reply_markup=build_panel_keyboard(
+                        deps.locales, chat.digest_language, chat.attach_files
+                    )
                 )
             else:
                 await message.reply(text)
@@ -341,6 +355,7 @@ def build_router(deps) -> Router:
     register("list", handle_list)
     register("lang", handle_lang)
     register("time", handle_time)
+    register("files", handle_files)
 
     @router.my_chat_member()
     async def _membership(update):  # §11: kicked/left -> active=false

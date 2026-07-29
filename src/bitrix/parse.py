@@ -128,17 +128,46 @@ def _attached_object_names(record: dict) -> tuple[str, ...]:
     return tuple(str(obj.get("NAME")) for obj in items if obj.get("NAME"))
 
 
-def extract_comment_files(records: list[dict]) -> list[tuple[str, int]]:
-    """ATTACHED_OBJECTS старых комментариев -> (имя файла, id комментария-источника) (§8, §13):
-    disk.file.get на файлы старых карточек отдаёт ACCESS_DENIED, поэтому ссылка строится не на
-    файл, а на комментарий, в котором он встречается (links.comment_url, собирает collector) —
-    отсюда возвращаем id комментария, а не FileLink напрямую. Инвариант: DOWNLOAD_URL/VIEW_URL
-    (несут токен вебхука) сюда не читаются и никогда не попадают наружу."""
-    out: list[tuple[str, int]] = []
+@dataclass(frozen=True)
+class AttachedFile:
+    """Вложение комментария старой карточки (§8, §13) — сырьё ДЛЯ ЗАГРУЗЧИКА
+    (`src.bitrix.files.download_attachment`), не для показа партнёру напрямую.
+    `download_url` — необработанный `DOWNLOAD_URL` из `ATTACHED_OBJECTS`: несёт
+    незатухающий токен вебхука (§8), поэтому качается СЕРВЕРНО и никогда не должен
+    попасть в `FileLink.url` (тот идёт партнёру в тексте дайджеста) — собирает это
+    разделение `collector`, здесь только сбор сырых полей."""
+    name: str
+    comment_id: int
+    download_url: str | None
+    size: int | None
+
+
+def _attachment_size(obj: dict) -> int | None:
+    raw = obj.get("SIZE")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_comment_files(records: list[dict]) -> list[AttachedFile]:
+    """ATTACHED_OBJECTS старых комментариев -> AttachedFile(имя, id комментария-источника,
+    сырой DOWNLOAD_URL, размер) (§8, §13): ссылка ПАРТНЁРУ строится не на файл, а на
+    комментарий, в котором он встречается (links.comment_url, собирает collector) —
+    `download_url`/`size` тут нужны только загрузчику вложений (`bitrix.files`), который
+    качает файл сервером и шлёт содержимое, а не ссылку. Инвариант: `download_url` НЕ
+    должен попасть в `FileLink.url` (тот идёт партнёру в HTML дайджеста) — за этим следит
+    collector, не эта функция."""
+    out: list[AttachedFile] = []
     for r in records:
         comment_id = int(r["ID"])
         attached = r.get("ATTACHED_OBJECTS") or {}
         items = attached.values() if isinstance(attached, dict) else attached
         for obj in items:
-            out.append((str(obj.get("NAME") or ""), comment_id))
+            out.append(AttachedFile(
+                name=str(obj.get("NAME") or ""),
+                comment_id=comment_id,
+                download_url=obj.get("DOWNLOAD_URL") or None,
+                size=_attachment_size(obj),
+            ))
     return out

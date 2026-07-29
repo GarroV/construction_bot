@@ -329,6 +329,62 @@ async def test_auto_configured_column_defaults_to_false_for_preexisting_rows(poo
     assert fresh.auto_configured is False
 
 
+# --- attach_files (миграция 0006): per-country пересылка файлов-вложений в чат (§8) ---
+
+
+async def test_new_chat_defaults_attach_files_to_false(pool):
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+
+    assert chat.attach_files is False
+
+
+async def test_set_attach_files_flips_flag_to_true(pool):
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+
+    await repo.set_attach_files(pool, chat.id, True)
+
+    fresh = (await repo.list_active_chats(pool))[0]
+    assert fresh.attach_files is True
+
+
+async def test_set_attach_files_can_be_reset_to_false(pool):
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    await repo.set_attach_files(pool, chat.id, True)
+
+    await repo.set_attach_files(pool, chat.id, False)
+
+    fresh = (await repo.list_active_chats(pool))[0]
+    assert fresh.attach_files is False
+
+
+async def test_attach_files_column_defaults_to_false_for_preexisting_rows(pool):
+    """Миграция 0006: ALTER TABLE ... ADD COLUMN attach_files BOOLEAN NOT NULL
+    DEFAULT FALSE — прямая проверка через INSERT без указания колонки (как были бы
+    строки, заведённые до миграции)."""
+    await pool.execute(
+        "INSERT INTO chats (telegram_chat_id, message_thread_id, country, digest_language) "
+        "VALUES ($1, $2, $3, $4)",
+        -999, 7, "Тест", "ru",
+    )
+
+    fresh = (await repo.list_active_chats(pool))[0]
+
+    assert fresh.attach_files is False
+
+
+async def test_set_attach_files_is_independent_of_auto_configured(pool):
+    """§8: /files НЕ трогает auto_configured — независимый флаг от автонастройки языка/
+    таймзоны из карточки (§5)."""
+    chat, _ = await repo.upsert_chat(pool, -100, 7, "Кыргызстан", "ru")
+    assert chat.auto_configured is False
+
+    await repo.set_attach_files(pool, chat.id, True)
+
+    fresh = (await repo.list_active_chats(pool))[0]
+    assert fresh.attach_files is True
+    assert fresh.auto_configured is False
+
+
 async def test_put_cached_llm_lazily_deletes_rows_older_than_48h(pool):
     """put_cached_llm заодно чистит записи старше 48h (ленивая очистка, §7) — проверяем
     побочный эффект другого вызова put_cached_llm, а не отдельную функцию очистки."""

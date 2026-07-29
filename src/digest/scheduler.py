@@ -8,10 +8,12 @@ from zoneinfo import ZoneInfo
 from src import repo
 from src.bitrix import links, methods
 from src.bitrix.client import BitrixClient, BitrixError
+from src.bitrix.files import download_attachment
+from src.bitrix.parse import AttachedFile
 from src.digest import collector, llm, render
 from src.i18n import t
 from src.repo import CardRow, ChatRow
-from src.telegram.send import SendResult, send_html
+from src.telegram.send import SendResult, send_document, send_html
 
 log = logging.getLogger(__name__)
 SendFn = Callable[..., Awaitable[SendResult]]
@@ -34,6 +36,7 @@ class Deps:
     overview_template: str = ""  # prompts/overview.txt (§5, «Отчёт по запросу»)
     send_fn: SendFn = field(default=send_html)
     bot_username: str = ""  # для строгой адресации команд в группах
+    http: Any = None  # httpx.AsyncClient для download_attachment (§8) — тот же клиент, что у bx
 
 
 def _chat_label(chat: ChatRow) -> str:
@@ -196,11 +199,16 @@ async def process_chat(
         # Фаза 1: рендер блоков карточек — per-card try/except как раньше, сбой одной
         # карточки изолирован (её блок выпадает, попадает в errors, остальные едут дальше
         # в общем сообщении чата, §7 п.6 fallback-путь не затронут).
+        # block_attachments идёт параллельно blocks (тот же индекс, §8): attachments —
+        # либо от overview (сводка «текущее состояние»), либо от исходной delta —
+        # только то, что реально попало в отправленный текст этого блока.
         blocks: list[tuple[llm.CardDelta, str]] = []
+        block_attachments: list[tuple[AttachedFile, ...]] = []
         for card, delta, cursor in deltas:
             try:
                 url = links.task_url(deps.settings.bitrix_webhook_url,
                                      deps.bx.webhook_user_id, delta.task_id)
+                attachments: tuple[AttachedFile, ...] = ()
                 if not delta.has_changes:
                     if overview_on_empty:
                         overview = await collector.collect_card_overview(deps.bx, card, cursor)
@@ -209,6 +217,7 @@ async def process_chat(
                                 deps, overview, lang, str(local_date), errors, chat)
                             text = render.overview_message(overview, summary, url, deps.locales,
                                                            lang, report_no_new_text)
+                            attachments = overview.attachments
                         else:  # 0 комментариев за всё время — обзору не из чего собираться
                             text = render.report_empty_card_line(delta.alias, url, report_empty_text)
                     else:
@@ -216,7 +225,9 @@ async def process_chat(
                 else:
                     summary = await _summarize_or_none(deps, delta, lang, str(local_date), errors, chat)
                     text = render.card_message(delta, summary, url, deps.locales, lang)
+                    attachments = delta.attachments
                 blocks.append((delta, text))
+                block_attachments.append(attachments)
             except Exception as e:
                 log.exception("рендер карточки %s/%s", chat.id, delta.task_id)
                 errors.append(f"{_chat_label(chat)}: карточка #{delta.task_id}: {e}")
@@ -262,6 +273,15 @@ async def process_chat(
                         log.exception("запись курсора %s/%s", chat.id, delta.task_id)
                         errors.append(f"{_chat_label(chat)}: курсор #{delta.task_id} не записан: {e}")
                         continue
+                if chat.attach_files:
+                    # Файлы — ПОСЛЕ текста, последовательно (§8): курсорную семантику не
+                    # трогаем, пересылка — довесок к уже отправленному чанку. Работает
+                    # одинаково и для обычных карточек, и для overview-режима (у обеих
+                    # block_attachments[i] уже несёт правильный источник вложений).
+                    for i in chunk_indices:
+                        errors += await _send_attachments(
+                            deps, chat, blocks[i][0].task_id, block_attachments[i]
+                        )
             except Exception as e:  # изоляция отправки (§7 п.9): чат не должен ретраиться каждые 5 мин
                 log.exception("отправка чанка дайджеста %s", chat.id)
                 errors.append(f"{_chat_label(chat)}: отправка дайджеста: {e}")
@@ -278,6 +298,39 @@ async def process_chat(
         if result.ok:
             await repo.mark_ping(deps.pool, chat.id)
     return errors, posted
+
+
+async def _send_attachments(
+    deps: Deps, chat: ChatRow, task_id: int, attachments: tuple[AttachedFile, ...]
+) -> list[str]:
+    """Пересылка вложений карточки содержимым (§8, per-country `chat.attach_files`) —
+    ПОСЛЕ уже успешно отправленного текстового чанка, строго последовательно. Каждый
+    файл в своём try/except: сбой одного (сеть, Telegram) не должен ронять пересылку
+    остальных файлов чанка или прогон чата целиком.
+
+    `download_attachment` вернул `None` — деградация, НЕ ошибка (antibot-challenge
+    Servicepipe, пока не оформлено WAF-исключение по маркеру construction-bot, ИЛИ файл
+    больше лимита Telegram): текущее поведение (ссылка на комментарий уже в тексте
+    дайджеста) не меняется, только `warning` в лог — в `errors` (и в admin-сводку) это
+    не попадает, чтобы не шуметь на каждый прогон, пока WAF-исключение не появится."""
+    errors: list[str] = []
+    for a in attachments:
+        if not a.download_url:
+            continue
+        try:
+            data = await download_attachment(deps.http, a.download_url)
+            if data is None:
+                log.warning("файл %r (#%s) недоступен для пересылки (antibot-challenge/лимит "
+                            "Telegram) — деградация на ссылку в дайджесте", a.name, task_id)
+                continue
+            result = await send_document(deps.bot, chat.telegram_chat_id,
+                                         chat.message_thread_id, a.name, data)
+            if not result.ok:
+                errors.append(f"{_chat_label(chat)}: файл {a.name} (#{task_id}) не отправлен")
+        except Exception as e:
+            log.exception("пересылка файла %s (#%s)", a.name, task_id)
+            errors.append(f"{_chat_label(chat)}: файл {a.name} (#{task_id}): {e}")
+    return errors
 
 
 async def _summarize_cached(deps, prompt: str, errors: list[str], chat, task_id: int) -> str | None:

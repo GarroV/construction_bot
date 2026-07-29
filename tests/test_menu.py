@@ -30,7 +30,7 @@ def make_deps(**over):
 
 CHAT = SimpleNamespace(
     id=1, telegram_chat_id=-100, message_thread_id=7, digest_language="ru",
-    timezone="UTC", last_posted_at=None, country=None,
+    timezone="UTC", last_posted_at=None, country=None, attach_files=False,
 )
 
 CARDS = [
@@ -75,6 +75,24 @@ def test_build_panel_keyboard_texts_and_callback_data():
     assert by_data["m:report"] == t(LOCALES, "ru", "btn_report")
     assert by_data["m:time"] == t(LOCALES, "ru", "btn_time")
     assert by_data["m:lang"] == t(LOCALES, "ru", "btn_lang")
+
+
+# --- m:files (§8): кнопка показывает состояние тумблера прямо на себе ---
+
+def test_build_panel_keyboard_files_button_shows_off_state_by_default():
+    kb = menu.build_panel_keyboard(LOCALES, "ru")
+    flat = [btn for row in kb.inline_keyboard for btn in row]
+    by_data = {btn.callback_data: btn.text for btn in flat}
+
+    assert by_data["m:files"] == f"{t(LOCALES, 'ru', 'btn_files')} ❌"
+
+
+def test_build_panel_keyboard_files_button_shows_on_state_when_enabled():
+    kb = menu.build_panel_keyboard(LOCALES, "ru", attach_files=True)
+    flat = [btn for row in kb.inline_keyboard for btn in row]
+    by_data = {btn.callback_data: btn.text for btn in flat}
+
+    assert by_data["m:files"] == f"{t(LOCALES, 'ru', 'btn_files')} ✅"
 
 
 def test_render_panel_text_lists_cards_or_empty_placeholder():
@@ -600,6 +618,45 @@ async def test_dispatch_callback_lang_unknown_code_ignored(monkeypatch):
     callback.answer.assert_awaited_once()
     set_lang.assert_not_awaited()
     callback.message.answer.assert_not_awaited()
+
+
+# --- m:files: тоггл (не диалог) — переключает флаг и сразу обновляет панель на месте ---
+
+async def test_dispatch_callback_files_toggles_on_and_refreshes_panel(monkeypatch):
+    deps = make_deps()
+    chat = SimpleNamespace(**{**vars(CHAT), "attach_files": False})
+    monkeypatch.setattr(menu, "ensure_chat_for_callback", AsyncMock(return_value=chat))
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=CARDS))
+    set_attach = AsyncMock()
+    monkeypatch.setattr(menu.repo, "set_attach_files", set_attach)
+
+    callback = _callback("m:files")
+    await menu.dispatch_callback(deps, callback)
+
+    set_attach.assert_awaited_once_with(deps.pool, chat.id, True)
+    callback.message.edit_text.assert_awaited_once()
+    args, kwargs = callback.message.edit_text.await_args
+    kb = kwargs["reply_markup"]
+    by_data = {btn.callback_data: btn.text for row in kb.inline_keyboard for btn in row}
+    assert by_data["m:files"] == f"{t(LOCALES, 'ru', 'btn_files')} ✅"
+
+
+async def test_dispatch_callback_files_toggles_off_when_already_enabled(monkeypatch):
+    deps = make_deps()
+    chat = SimpleNamespace(**{**vars(CHAT), "attach_files": True})
+    monkeypatch.setattr(menu, "ensure_chat_for_callback", AsyncMock(return_value=chat))
+    monkeypatch.setattr(menu.repo, "list_active_cards", AsyncMock(return_value=CARDS))
+    set_attach = AsyncMock()
+    monkeypatch.setattr(menu.repo, "set_attach_files", set_attach)
+
+    callback = _callback("m:files")
+    await menu.dispatch_callback(deps, callback)
+
+    set_attach.assert_awaited_once_with(deps.pool, chat.id, False)
+    kwargs = callback.message.edit_text.await_args.kwargs
+    kb = kwargs["reply_markup"]
+    by_data = {btn.callback_data: btn.text for row in kb.inline_keyboard for btn in row}
+    assert by_data["m:files"] == f"{t(LOCALES, 'ru', 'btn_files')} ❌"
 
 
 # --- send_*-функции: общий код диалоговых флоу для голых команд И кнопок панели ---

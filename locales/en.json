@@ -11,6 +11,9 @@
   "list_empty": "Nothing is tracked in this topic yet. Add a card: /add <id>",
   "lang_ok": "Digest language: {code}",
   "lang_usage": "Usage: /lang <language code>, e.g. /lang en",
+  "files_on": "File forwarding is on",
+  "files_off": "File forwarding is off",
+  "files_usage": "Usage: /files on or /files off",
   "time_ok": "Digest will arrive at {time} ({tz})",
   "time_usage": "Usage: /time <HH:MM> <city or timezone>, e.g. /time 09:00 Belgrade",
   "time_need_tz": "Please set a timezone: /time {time} Asia/Bishkek — otherwise UTC is used",
@@ -43,6 +46,7 @@
   "btn_report_all": "📊 All cards",
   "btn_time": "🕘 Time",
   "btn_lang": "🌐 Language",
+  "btn_files": "📎 Files",
   "btn_cancel": "Cancel",
   "start_help": "🍕 I deliver daily construction digests from Bitrix24.\n\nSetup (in the construction topic):\n/add <card id> — track a card (Bitrix task ID)\n/time 09:00 Europe/Belgrade — digest time and timezone\n/lang en — digest language\n\nEveryday:\n/list — what's tracked in this topic\n/remove <id> — stop tracking\n\nThen it's automatic: once a day I post a summary of the discussion, decisions/blockers, checklist status and files. No changes — no message. Only activity after /add counts.\n\nIn groups, use the bot menu or address me explicitly: /add@dodo_constr_bot 42103 — I ignore bare commands in groups (other bots may live there)."
 }

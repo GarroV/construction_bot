@@ -3,7 +3,8 @@ import datetime as dt
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from src.bitrix.links import FileLink  # noqa: F401  (для будущих дельт с файлами)
+from src.bitrix.links import FileLink
+from src.bitrix.parse import AttachedFile, ChatMessage
 from src.digest import llm, scheduler
 from src.digest.llm import CardDelta
 from src.i18n import load_locales
@@ -976,3 +977,158 @@ async def test_discovery_calls_list_subtasks_only_for_manual_cards(monkeypatch):
 
     list_subtasks_mock.assert_not_awaited()
     repo_mocks.add_card.assert_not_awaited()
+
+
+# --- attach_files (§8): пересылка вложений СОДЕРЖИМЫМ, ПОСЛЕ успешно отправленного текста ---
+
+ATTACHMENT = AttachedFile(name="план.pdf", comment_id=103, download_url="https://x/secret", size=222)
+
+DELTA_WITH_ATTACHMENT = CardDelta(
+    task_id=8017, alias="Бишкек 8", task_changes=["статус: 2 → 5"], comments=[],
+    checklist_done=3, checklist_total=10,
+    files=[FileLink(name="план.pdf", url="https://task/view/8017/?commentId=103")],
+    new_history_id=31, new_message_id=202, attachments=(ATTACHMENT,),
+)
+
+
+async def test_attach_files_true_downloads_and_sends_document_after_text(monkeypatch):
+    chat = make_chat(attach_files=True)
+    patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_WITH_ATTACHMENT))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    download_mock = AsyncMock(return_value=b"pdfbytes")
+    monkeypatch.setattr(scheduler, "download_attachment", download_mock)
+    send_document_mock = AsyncMock(return_value=SendResult(ok=True))
+    monkeypatch.setattr(scheduler, "send_document", send_document_mock)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+    deps.http = object()
+
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert not errors
+    assert posted is True
+    send_fn.assert_awaited_once()  # текст уходит первым
+    download_mock.assert_awaited_once_with(deps.http, "https://x/secret")
+    send_document_mock.assert_awaited_once_with(
+        deps.bot, chat.telegram_chat_id, chat.message_thread_id, "план.pdf", b"pdfbytes"
+    )
+
+
+async def test_attach_files_false_skips_download_and_send(monkeypatch):
+    chat = make_chat(attach_files=False)
+    patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_WITH_ATTACHMENT))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    download_mock = AsyncMock()
+    monkeypatch.setattr(scheduler, "download_attachment", download_mock)
+    send_document_mock = AsyncMock()
+    monkeypatch.setattr(scheduler, "send_document", send_document_mock)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert posted is True
+    download_mock.assert_not_awaited()
+    send_document_mock.assert_not_awaited()
+
+
+async def test_attach_files_download_none_skips_send_document_and_warns(monkeypatch, caplog):
+    """download_attachment вернул None (antibot-challenge/лимит) — деградация: файл не
+    пересылается, ссылка на комментарий уже в тексте (текущее поведение), warning в лог,
+    НЕ ошибка (errors пуст)."""
+    chat = make_chat(attach_files=True)
+    patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_WITH_ATTACHMENT))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    monkeypatch.setattr(scheduler, "download_attachment", AsyncMock(return_value=None))
+    send_document_mock = AsyncMock()
+    monkeypatch.setattr(scheduler, "send_document", send_document_mock)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    with caplog.at_level("WARNING", logger="src.digest.scheduler"):
+        errors, posted = await scheduler.process_chat(
+            deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC)
+        )
+
+    send_document_mock.assert_not_awaited()
+    assert not errors
+    assert posted is True
+    assert any("план.pdf" in r.message for r in caplog.records)
+
+
+async def test_attach_files_send_document_failure_is_isolated_in_errors(monkeypatch):
+    chat = make_chat(attach_files=True)
+    patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta",
+                        AsyncMock(return_value=DELTA_WITH_ATTACHMENT))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    monkeypatch.setattr(scheduler, "download_attachment", AsyncMock(return_value=b"pdfbytes"))
+    monkeypatch.setattr(scheduler, "send_document", AsyncMock(return_value=SendResult(ok=False)))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    assert posted is True  # текст уже ушёл — сбой файла не откатывает это
+    assert any("план.pdf" in e for e in errors)
+
+
+async def test_attach_files_true_sends_files_in_overview_mode_too(monkeypatch):
+    """§8: overview-режим (report-путь без новых изменений) шлёт файлы так же, как
+    обычный дайджест — единообразно, если флаг включён."""
+    chat = make_chat(attach_files=True)
+    patch_repo(monkeypatch, cards=[CARD])
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", AsyncMock(return_value=DELTA_EMPTY))
+    overview_with_attachment = CardDelta(
+        task_id=8017, alias="Бишкек 8", task_changes=[],
+        comments=[ChatMessage(id=1, author="Иван", text="план готов", file_ids=[])],
+        checklist_done=3, checklist_total=10,
+        files=[FileLink(name="план.pdf", url="https://task/view/8017/?commentId=103")],
+        new_history_id=20, new_message_id=200, attachments=(ATTACHMENT,),
+    )
+    monkeypatch.setattr(scheduler.collector, "collect_card_overview",
+                        AsyncMock(return_value=overview_with_attachment))
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="Стройка идёт по плану."))
+    download_mock = AsyncMock(return_value=b"pdfbytes")
+    monkeypatch.setattr(scheduler, "download_attachment", download_mock)
+    send_document_mock = AsyncMock(return_value=SendResult(ok=True))
+    monkeypatch.setattr(scheduler, "send_document", send_document_mock)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    errors, posted = await scheduler.process_chat(
+        deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC), mark_run=False, overview_on_empty=True,
+    )
+
+    assert not errors
+    assert posted is True
+    download_mock.assert_awaited_once_with(deps.http, "https://x/secret")
+    send_document_mock.assert_awaited_once()
+
+
+async def test_attach_files_no_changes_no_attachments_does_not_call_download(monkeypatch):
+    """attach_files=True, но карточка вообще без изменений и без overview (тик обычный) —
+    ветка отправки файлов не должна дёргать download_attachment (нечего пересылать)."""
+    chat = make_chat(attach_files=True)
+    patch_repo(monkeypatch, cards=[CARD, CARD2])
+
+    async def fake_collect(bx, card, cursor):
+        return DELTA_WITH_ATTACHMENT if card.bitrix_task_id == 8017 else DELTA_EMPTY_2
+
+    monkeypatch.setattr(scheduler.collector, "collect_card_delta", fake_collect)
+    monkeypatch.setattr(scheduler.llm, "summarize", AsyncMock(return_value="ок"))
+    download_mock = AsyncMock(return_value=b"pdfbytes")
+    monkeypatch.setattr(scheduler, "download_attachment", download_mock)
+    monkeypatch.setattr(scheduler, "send_document", AsyncMock(return_value=SendResult(ok=True)))
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn)
+
+    await scheduler.process_chat(deps, chat, dt.datetime(2026, 7, 2, 10, 0, tzinfo=UTC))
+
+    download_mock.assert_awaited_once()  # только карточка 8017 несла вложение

@@ -24,7 +24,7 @@ async def test_migrations_apply_and_are_idempotent(pool):
 
     assert applied_first == [
         "0001_init.sql", "0002_last_comment_id.sql", "0003_auto_from.sql", "0004_llm_cache.sql",
-        "0005_auto_configured.sql",
+        "0005_auto_configured.sql", "0006_attach_files.sql",
     ]
     assert applied_second == []  # повторный прогон ничего не применяет
     tables = {

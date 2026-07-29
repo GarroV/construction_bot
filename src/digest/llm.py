@@ -8,7 +8,7 @@ from pathlib import Path
 import openai
 
 from src.bitrix.links import FileLink
-from src.bitrix.parse import ChatMessage
+from src.bitrix.parse import AttachedFile, ChatMessage
 
 log = logging.getLogger(__name__)
 _ATTEMPTS = 3
@@ -39,6 +39,11 @@ class CardDelta:
     stage_done: int = 0
     stage_total: int = 0
     has_stages: bool = False  # есть ли у чек-листа иерархия этапов вообще
+    # Вложения для СЕРВЕРНОЙ пересылки файлом (§8, per-country chats.attach_files) —
+    # дефолт () не ломает существующие конструкторы CardDelta по всей кодовой базе.
+    # Заполняется только веткой старой карточки (§13 fallback, `extract_comment_files`);
+    # у новой карточки (files чата задачи) пересылка вне охвата этой фичи.
+    attachments: tuple[AttachedFile, ...] = ()
 
     @property
     def has_changes(self) -> bool:

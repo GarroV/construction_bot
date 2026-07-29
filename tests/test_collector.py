@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 from src.bitrix.links import FileLink
 from src.bitrix.methods import ChecklistSummary
-from src.bitrix.parse import ChatMessage
+from src.bitrix.parse import AttachedFile, ChatMessage
 from src.digest import collector
 from src.repo import CardRow, CursorRow
 
@@ -39,6 +39,9 @@ async def test_collect_card_delta_assembles_everything(monkeypatch):
     assert (delta.checklist_done, delta.checklist_total) == (3, 10)
     assert delta.has_stages is True
     assert (delta.stage_title, delta.stage_done, delta.stage_total) == ("02 Store design", 1, 5)
+    # §8: пересылка файлов охватывает только ветку старой карточки (extract_comment_files) —
+    # у новой карточки (files чата задачи, resolve_files) attachments остаётся пустым.
+    assert delta.attachments == ()
 
 
 async def test_collect_empty_delta_keeps_cursor(monkeypatch):
@@ -68,7 +71,7 @@ async def test_collect_card_delta_old_card_uses_comments_and_skips_chat(monkeypa
                         AsyncMock(return_value={"title": "Старая стройка"}))  # нет chatId
     fetch_comments = AsyncMock(return_value=[
         {"ID": "103", "AUTHOR_NAME": "Пётр", "POST_MESSAGE": "[USER=1]Иван[/USER], привет",
-         "ATTACHED_OBJECTS": {"1": {"NAME": "план.pdf",
+         "ATTACHED_OBJECTS": {"1": {"NAME": "план.pdf", "SIZE": "222",
                                      "DOWNLOAD_URL": "secret", "VIEW_URL": "secret"}}},
     ])
     monkeypatch.setattr(collector.methods, "fetch_new_comments", fetch_comments)
@@ -91,6 +94,11 @@ async def test_collect_card_delta_old_card_uses_comments_and_skips_chat(monkeypa
         url="https://portal.bitrix24.ru/company/personal/user/123/tasks/task/view/8017/"
             "?commentId=103#com103",
     )]
+    # §8: attachments несёт сырой DOWNLOAD_URL для загрузчика — но НЕ в FileLink.url
+    # (тот уходит партнёру в тексте дайджеста, см. проверку ниже).
+    assert delta.attachments == (AttachedFile(name="план.pdf", comment_id=103,
+                                              download_url="secret", size=222),)
+    assert "secret" not in delta.files[0].url
     assert delta.new_comment_id == 103
     assert delta.new_message_id == cur.last_message_id  # старая карточка: курсор чата не двигается
     fetch_comments.assert_awaited_once_with(bx, 8017, 100)
@@ -124,6 +132,7 @@ async def test_collect_card_overview_new_chat_takes_latest_k_independent_of_curs
     assert overview.comments[0].author == "Иван"
     assert overview.task_changes == []  # обзору история изменений не нужна
     assert (overview.checklist_done, overview.checklist_total) == (3, 10)
+    assert overview.attachments == ()  # §8: новая карточка вне охвата пересылки файлов
     fetch_latest.assert_awaited_once_with(bx, 42, 5)
 
 
@@ -155,7 +164,7 @@ async def test_collect_card_overview_old_card_uses_latest_comments_and_comment_u
                         AsyncMock(return_value={"title": "Старая стройка"}))  # нет chatId
     fetch_latest_comments = AsyncMock(return_value=[
         {"ID": "103", "AUTHOR_NAME": "Пётр", "POST_MESSAGE": "план готов",
-         "ATTACHED_OBJECTS": {"1": {"NAME": "план.pdf",
+         "ATTACHED_OBJECTS": {"1": {"NAME": "план.pdf", "SIZE": "333",
                                      "DOWNLOAD_URL": "secret", "VIEW_URL": "secret"}}},
     ])
     monkeypatch.setattr(collector.methods, "fetch_latest_comments", fetch_latest_comments)
@@ -173,6 +182,10 @@ async def test_collect_card_overview_old_card_uses_latest_comments_and_comment_u
         url="https://portal.bitrix24.ru/company/personal/user/123/tasks/task/view/8017/"
             "?commentId=103#com103",
     )]
+    # §8: attachments (для загрузчика) отделены от FileLink.url (партнёру)
+    assert overview.attachments == (AttachedFile(name="план.pdf", comment_id=103,
+                                                 download_url="secret", size=333),)
+    assert "secret" not in overview.files[0].url
     fetch_latest_comments.assert_awaited_once_with(bx, 8017, 5)
     fetch_chat.assert_not_awaited()
 

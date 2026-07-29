@@ -138,17 +138,40 @@ def test_parse_comments_fills_file_names_from_own_attached_objects():
     assert msgs[1].file_names == ("план.pdf",)  # id=101 — своё ATTACHED_OBJECTS
 
 
-def test_extract_comment_files_returns_name_and_comment_id():
-    """Переименовано из parse_comment_files (§8 фича 2): ссылка строится не на файл
-    (disk.file.get -> ACCESS_DENIED), а на комментарий-источник — нужен его id, не FileLink."""
+def test_extract_comment_files_returns_attached_file_with_download_url_and_size():
+    """§8 (пересылка вложений): extract_comment_files теперь отдаёт AttachedFile —
+    имя, id комментария-источника (нужен для links.comment_url — прямой доступ к
+    файлу закрыт, disk.file.get -> ACCESS_DENIED), СЫРОЙ DOWNLOAD_URL и размер. Сырой
+    DOWNLOAD_URL здесь — намеренно: он нужен ТОЛЬКО загрузчику (bitrix.files,
+    качает сервером), collector следит, чтобы он не попал в FileLink.url партнёру
+    (см. test_collector.py)."""
     records = json.loads((FIX / "comments_page.json").read_text())
 
     files = parse.extract_comment_files(records)
 
-    assert files == [("план.pdf", 101)]  # (имя, id комментария id=101, несущего вложение)
-    # инвариант §8: DOWNLOAD_URL/VIEW_URL (токен вебхука) не просачиваются наружу ни в имя, ни в id
-    dump = "".join(f"{name}{comment_id}" for name, comment_id in files)
-    assert "SUPER_SECRET_TOKEN" not in dump
+    assert files == [parse.AttachedFile(
+        name="план.pdf", comment_id=101,
+        download_url="https://portal.example/bitrix/tools/disk/uf.php?"
+                     "action=download&webhook_token=SUPER_SECRET_TOKEN",
+        size=12345,
+    )]
+
+
+def test_extract_comment_files_missing_size_defaults_to_none():
+    records = [{"ID": "5", "ATTACHED_OBJECTS": {"1": {"NAME": "файл.txt", "DOWNLOAD_URL": "https://x"}}}]
+
+    files = parse.extract_comment_files(records)
+
+    assert files == [parse.AttachedFile(name="файл.txt", comment_id=5,
+                                        download_url="https://x", size=None)]
+
+
+def test_extract_comment_files_missing_download_url_defaults_to_none():
+    records = [{"ID": "5", "ATTACHED_OBJECTS": {"1": {"NAME": "файл.txt", "SIZE": "10"}}}]
+
+    files = parse.extract_comment_files(records)
+
+    assert files[0].download_url is None
 
 
 @respx.mock

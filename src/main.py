@@ -34,6 +34,7 @@ async def main() -> None:
             settings=s,
             prompt_template=llm_mod.load_prompt(),
             overview_template=llm_mod.load_prompt("prompts/overview.txt"),
+            http=http,
         )
         if s.dry_run:
             deps.send_fn = dry_run_send
@@ -52,6 +53,7 @@ async def main() -> None:
             BotCommand(command="remove", description="Снять карточку: /remove 42103"),
             BotCommand(command="time", description="Время дайджеста: /time 09:00 Europe/Belgrade"),
             BotCommand(command="lang", description="Язык дайджеста: /lang ru"),
+            BotCommand(command="files", description="Пересылка файлов: /files on или /files off"),
             BotCommand(command="menu", description="Панель управления: кнопки вместо команд"),
             BotCommand(command="report", description="Отчёт по стройкам прямо сейчас"),
             BotCommand(command="help", description="Как пользоваться ботом"),

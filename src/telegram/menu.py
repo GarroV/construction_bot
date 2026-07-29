@@ -74,14 +74,19 @@ def render_panel_text(locales, lang: str, cards: list[CardRow]) -> str:
     return t(locales, lang, "menu_title", cards=body)
 
 
-def build_panel_keyboard(locales, lang: str) -> InlineKeyboardMarkup:
+def build_panel_keyboard(locales, lang: str, attach_files: bool = False) -> InlineKeyboardMarkup:
+    """attach_files (§8) — рисует состояние тумблера прямо на кнопке (✅/❌), не через
+    отдельные locale-ключи per-состояние: files_on/files_off — тексты ответа на
+    /files on|off (полные фразы), эмодзи-индикатор языконезависим."""
     def btn(key: str, data: str) -> InlineKeyboardButton:
         return InlineKeyboardButton(text=t(locales, lang, key), callback_data=data)
 
+    files_text = f"{t(locales, lang, 'btn_files')} {'✅' if attach_files else '❌'}"
     return InlineKeyboardMarkup(inline_keyboard=[
         [btn("btn_add", "m:add"), btn("btn_rm", "m:rm")],
         [btn("btn_report", "m:report")],
         [btn("btn_time", "m:time"), btn("btn_lang", "m:lang")],
+        [InlineKeyboardButton(text=files_text, callback_data="m:files")],
     ])
 
 
@@ -223,7 +228,7 @@ async def _cmd_menu(deps, message: Message) -> None:
     cards = await repo.list_active_cards(deps.pool, chat.id)
     await message.reply(
         render_panel_text(deps.locales, chat.digest_language, cards),
-        reply_markup=build_panel_keyboard(deps.locales, chat.digest_language),
+        reply_markup=build_panel_keyboard(deps.locales, chat.digest_language, chat.attach_files),
     )
 
 
@@ -299,6 +304,17 @@ async def dispatch_callback(deps, callback: CallbackQuery) -> None:
         removed = await repo.deactivate_card(deps.pool, chat.id, task_id)
         key = "remove_ok" if removed else "remove_not_tracked"
         await message.edit_text(t(deps.locales, lang, key, task_id=task_id))
+    elif data == "m:files":
+        # §8: тоггл — не диалог (в отличие от m:add/m:time/m:lang/m:rm), одно нажатие
+        # переключает флаг и сразу обновляет панель на месте (edit_text), как m:rm:<id>.
+        await callback.answer()
+        new_value = not chat.attach_files
+        await repo.set_attach_files(deps.pool, chat.id, new_value)
+        cards = await repo.list_active_cards(deps.pool, chat.id)
+        await message.edit_text(
+            render_panel_text(deps.locales, lang, cards),
+            reply_markup=build_panel_keyboard(deps.locales, lang, new_value),
+        )
     elif data == "m:cancel":
         await callback.answer()
         await message.edit_text(t(deps.locales, lang, "menu_cancelled"))

@@ -452,6 +452,61 @@ async def test_lang(monkeypatch):
     set_auto.assert_awaited_once_with(deps.pool, 1, True)
 
 
+# --- /files on|off (§8): per-country пересылка файлов-вложений в чат, как handle_lang ---
+
+
+async def test_files_on_sets_flag_true_and_confirms(monkeypatch):
+    deps = make_deps()
+    set_attach = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_attach_files", set_attach)
+
+    reply = await commands.handle_files(deps, CHAT, "on")
+
+    set_attach.assert_awaited_once_with(deps.pool, 1, True)
+    assert "включ" in reply.lower()
+
+
+async def test_files_off_sets_flag_false_and_confirms(monkeypatch):
+    deps = make_deps()
+    set_attach = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_attach_files", set_attach)
+
+    reply = await commands.handle_files(deps, CHAT, "off")
+
+    set_attach.assert_awaited_once_with(deps.pool, 1, False)
+    assert "выключ" in reply.lower()
+
+
+async def test_files_is_case_insensitive(monkeypatch):
+    deps = make_deps()
+    monkeypatch.setattr(commands.repo, "set_attach_files", AsyncMock())
+    reply = await commands.handle_files(deps, CHAT, "ON")
+    assert "Использование" not in reply
+
+
+async def test_files_usage_on_empty_or_invalid_args(monkeypatch):
+    deps = make_deps()
+    set_attach = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_attach_files", set_attach)
+
+    assert "Использование" in await commands.handle_files(deps, CHAT, "")
+    assert "Использование" in await commands.handle_files(deps, CHAT, "yes")
+    set_attach.assert_not_awaited()
+
+
+async def test_files_does_not_touch_auto_configured(monkeypatch):
+    """§5/§8: /files — независимый флаг, НЕ должен ставить auto_configured (в отличие
+    от /lang и /time)."""
+    deps = make_deps()
+    monkeypatch.setattr(commands.repo, "set_attach_files", AsyncMock())
+    set_auto = AsyncMock()
+    monkeypatch.setattr(commands.repo, "set_auto_configured", set_auto)
+
+    await commands.handle_files(deps, CHAT, "on")
+
+    set_auto.assert_not_awaited()
+
+
 async def test_membership_kicked_deactivates_chats(monkeypatch):
     pool = AsyncMock()
     pool.fetch = AsyncMock(return_value=[{"id": 1}, {"id": 2}])

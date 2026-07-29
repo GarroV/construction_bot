@@ -42,6 +42,7 @@ async def main(task_id: int, rewind: int) -> None:
             settings=s,
             prompt_template=llm_mod.load_prompt(),
             overview_template=llm_mod.load_prompt("prompts/overview.txt"),
+            http=http,
         )
         if s.dry_run:
             deps.send_fn = dry_run_send
