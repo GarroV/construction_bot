@@ -72,15 +72,25 @@ def format_last_posted_at(chat: ChatRow) -> str | None:
     return local.strftime(_REPORT_DATE_FMT)
 
 
-def is_digest_due(chat: ChatRow, now_utc: dt.datetime, interval: dt.timedelta) -> bool:
-    """Почасовой режим (§7): прогон, если с прошлого прошло >= interval. Первый прогон
-    (last_run_at IS NULL) — сразу. Время суток/таймзона на расписание больше НЕ влияют:
-    молчание при отсутствии изменений (§7 п.5, any(has_changes)) само делает поток тихим —
-    пустой час не порождает ни LLM-вызова, ни сообщения. digest_time/timezone остаются для
-    рендера дат и команды /time, но расписание теперь чисто интервальное."""
-    if chat.last_run_at is None:
-        return True
-    return (now_utc - chat.last_run_at) >= interval
+DIGEST_HOURS = (9, 11, 13, 15, 17, 19)  # локальные часы проверок (§7), по таймзоне чата
+
+
+def is_digest_due(chat: ChatRow, now_utc: dt.datetime) -> bool:
+    """Проверки в фиксированные локальные часы DIGEST_HOURS (9/11/13/15/17/19 по таймзоне
+    чата). Due, если наступил очередной слот, по которому ещё не было прогона: берём
+    последний наступивший сегодня слот и сравниваем момент его начала с last_run_at. До
+    первого слота (раньше 9:00 локальных) и ночью (после 19:00, пока не наступит 9:00
+    следующего дня) — не due. Первый прогон (last_run_at IS NULL) срабатывает в первый же
+    наступивший слот. Молчание при отсутствии изменений (§7 п.5) отдельно глушит поток на
+    пустых слотах. Таймзона критична — берётся из chat.timezone (safe_zoneinfo с UTC-fallback)."""
+    local = now_utc.astimezone(safe_zoneinfo(chat.timezone, _chat_label(chat)))
+    passed = [h for h in DIGEST_HOURS if h <= local.hour]
+    if not passed:
+        return False  # раньше первого слота дня
+    slot_utc = local.replace(
+        hour=passed[-1], minute=0, second=0, microsecond=0
+    ).astimezone(dt.timezone.utc)
+    return chat.last_run_at is None or chat.last_run_at < slot_utc
 
 
 def is_ping_due(chat: ChatRow, now_utc: dt.datetime, ping_days: int, has_active_cards: bool) -> bool:
@@ -397,11 +407,10 @@ async def _summarize_overview_or_none(deps, overview, lang, date_str, errors, ch
 
 async def tick(deps: Deps, now_utc: dt.datetime | None = None) -> None:
     now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
-    interval = dt.timedelta(minutes=deps.settings.digest_interval_minutes)
     errors: list[str] = []
     for chat in await repo.list_active_chats(deps.pool):
         try:
-            if not is_digest_due(chat, now_utc, interval):
+            if not is_digest_due(chat, now_utc):
                 continue
             chat_errors, _posted = await process_chat(deps, chat, now_utc)
             errors += chat_errors

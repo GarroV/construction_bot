@@ -55,7 +55,6 @@ def make_deps(send_fn, **settings_over) -> scheduler.Deps:
         bitrix_webhook_url="https://portal.example.com/rest/1/token/",
         openai_model="gpt-5-mini",
         weekly_ping_days=7,
-        digest_interval_minutes=60,
         admin_chat_id=None,
     )
     for k, v in settings_over.items():
