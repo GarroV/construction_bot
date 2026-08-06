@@ -72,11 +72,15 @@ def format_last_posted_at(chat: ChatRow) -> str | None:
     return local.strftime(_REPORT_DATE_FMT)
 
 
-def is_digest_due(chat: ChatRow, now_utc: dt.datetime) -> bool:
-    local = now_utc.astimezone(safe_zoneinfo(chat.timezone, _chat_label(chat)))
-    if local.time() < chat.digest_time:
-        return False
-    return chat.last_digest_date is None or chat.last_digest_date < local.date()
+def is_digest_due(chat: ChatRow, now_utc: dt.datetime, interval: dt.timedelta) -> bool:
+    """Почасовой режим (§7): прогон, если с прошлого прошло >= interval. Первый прогон
+    (last_run_at IS NULL) — сразу. Время суток/таймзона на расписание больше НЕ влияют:
+    молчание при отсутствии изменений (§7 п.5, any(has_changes)) само делает поток тихим —
+    пустой час не порождает ни LLM-вызова, ни сообщения. digest_time/timezone остаются для
+    рендера дат и команды /time, но расписание теперь чисто интервальное."""
+    if chat.last_run_at is None:
+        return True
+    return (now_utc - chat.last_run_at) >= interval
 
 
 def is_ping_due(chat: ChatRow, now_utc: dt.datetime, ping_days: int, has_active_cards: bool) -> bool:
@@ -288,7 +292,7 @@ async def process_chat(
                 continue
 
     if mark_run:
-        await repo.mark_digest_run(deps.pool, chat.id, local_date)  # всегда, кроме /report (§7 п.9)
+        await repo.mark_digest_run(deps.pool, chat.id, now_utc)  # timestamp прогона (§7 почасовой); всегда, кроме /report
     if posted:
         await repo.mark_posted(deps.pool, chat.id)
     elif mark_run and is_ping_due(chat, now_utc, deps.settings.weekly_ping_days, bool(cards)):
@@ -393,10 +397,11 @@ async def _summarize_overview_or_none(deps, overview, lang, date_str, errors, ch
 
 async def tick(deps: Deps, now_utc: dt.datetime | None = None) -> None:
     now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
+    interval = dt.timedelta(minutes=deps.settings.digest_interval_minutes)
     errors: list[str] = []
     for chat in await repo.list_active_chats(deps.pool):
         try:
-            if not is_digest_due(chat, now_utc):  # невалидная tz одного чата не должна глушить остальные
+            if not is_digest_due(chat, now_utc, interval):
                 continue
             chat_errors, _posted = await process_chat(deps, chat, now_utc)
             errors += chat_errors

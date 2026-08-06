@@ -55,6 +55,7 @@ def make_deps(send_fn, **settings_over) -> scheduler.Deps:
         bitrix_webhook_url="https://portal.example.com/rest/1/token/",
         openai_model="gpt-5-mini",
         weekly_ping_days=7,
+        digest_interval_minutes=60,
         admin_chat_id=None,
     )
     for k, v in settings_over.items():
@@ -464,10 +465,11 @@ async def test_tick_isolates_chat_errors_and_reports_admin(monkeypatch):
     assert "ошибк" in args[3].lower()
 
 
-async def test_tick_falls_back_to_utc_for_invalid_timezone_and_continues(monkeypatch, caplog):
-    """Ревью (safe_zoneinfo): невалидная timezone одного чата больше не абортит его
-    обработку исключением ZoneInfoNotFoundError — is_digest_due деградирует на UTC и
-    чат едет наравне с остальными; сигнал не теряется — есть warning в логе."""
+async def test_tick_processes_all_chats_regardless_of_timezone(monkeypatch):
+    """Расписание интервальное (§7 почасовой) и tz-независимое: чат с любой (в т.ч.
+    невалидной) таймзоной попадает в обработку наравне с остальными — is_digest_due
+    смотрит только на last_run_at, не на время суток. Битая tz разрешается уже в
+    process_chat через safe_zoneinfo (проверяется отдельно), tick при этом не падает."""
     chat1 = make_chat(id=1, telegram_chat_id=-100, timezone="Invalid/Zone")
     chat2 = make_chat(id=2, telegram_chat_id=-200, country="Казахстан")
     monkeypatch.setattr(scheduler.repo, "list_active_chats", AsyncMock(return_value=[chat1, chat2]))
@@ -478,15 +480,12 @@ async def test_tick_falls_back_to_utc_for_invalid_timezone_and_continues(monkeyp
     send_fn = AsyncMock(return_value=SendResult(ok=True))
     deps = make_deps(send_fn, admin_chat_id=42)
 
-    now = dt.datetime(2026, 7, 21, 10, 0, tzinfo=UTC)  # 10:00 UTC >= digest_time 09:00 (по UTC-фолбэку)
-    with caplog.at_level("WARNING", logger="src.digest.scheduler"):
-        await scheduler.tick(deps, now)  # не должен упасть на невалидной tz первого чата
+    now = dt.datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
+    await scheduler.tick(deps, now)  # не должен упасть; last_run_at=None у обоих -> оба due
 
     processed_ids = {call.args[1].id for call in process_chat_mock.await_args_list}
-    assert processed_ids == {chat1.id, chat2.id}  # оба чата обработаны — сбой tz не абортит прогон
-
+    assert processed_ids == {chat1.id, chat2.id}  # оба чата обработаны — расписание tz-независимо
     send_fn.assert_not_awaited()  # process_chat не вернул ошибок — admin-сводка не нужна
-    assert any("Invalid/Zone" in r.message for r in caplog.records)  # сигнал не потерян
 
 
 async def test_admin_summary_escapes_html(monkeypatch):

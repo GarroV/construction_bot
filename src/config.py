@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5.6-terra"
     postgres_dsn: str
     scheduler_tick_minutes: int = 5
+    digest_interval_minutes: int = 60  # почасовой режим (§7): как часто проверять карточки на изменения
     default_language: str = "en"
     admin_chat_id: int | None = None
     weekly_ping_days: int = 7

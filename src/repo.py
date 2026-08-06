@@ -6,7 +6,7 @@ import asyncpg
 _CHAT_COLS = (
     "id, country, telegram_chat_id, message_thread_id, digest_language, digest_time, "
     "timezone, last_digest_date, last_posted_at, last_ping_at, restricted, active, created_at, "
-    "auto_configured, attach_files"
+    "auto_configured, attach_files, last_run_at"
 )
 
 
@@ -32,6 +32,10 @@ class ChatRow:
     # Per-country пересылка файлов-вложений из комментариев в чат (§8, миграция 0006):
     # False (дефолт) = текущее поведение — файл только ссылкой на комментарий в дайджесте.
     attach_files: bool = False
+    # Почасовой режим (§7, миграция 0007): timestamp последнего ПРОГОНА тика (не отправки).
+    # NULL — прогонов ещё не было (первый тик сработает сразу). is_digest_due сравнивает
+    # now - last_run_at с интервалом (DIGEST_INTERVAL_MINUTES); время суток больше не влияет.
+    last_run_at: dt.datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -226,8 +230,11 @@ async def advance_cursor(
     )
 
 
-async def mark_digest_run(pool, chat_id: int, local_date: dt.date) -> None:
-    await pool.execute("UPDATE chats SET last_digest_date = $2 WHERE id = $1", chat_id, local_date)
+async def mark_digest_run(pool, chat_id: int, ran_at: dt.datetime) -> None:
+    """Отмечает прогон тика по чату timestamp'ом (почасовой режим, §7): is_digest_due
+    сравнивает now - last_run_at с интервалом. last_digest_date больше не двигаем — поле
+    осталось в схеме, но в расписании не участвует."""
+    await pool.execute("UPDATE chats SET last_run_at = $2 WHERE id = $1", chat_id, ran_at)
 
 
 async def mark_posted(pool, chat_id: int) -> None:

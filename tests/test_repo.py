@@ -157,11 +157,12 @@ async def test_cursor_advance_and_marks(pool):
     cur = await repo.get_cursor(pool, 8017, chat.id)
     assert (cur.last_history_id, cur.last_message_id, cur.last_comment_id) == (111, 222, 333)
 
-    await repo.mark_digest_run(pool, chat.id, dt.date(2026, 7, 21))
+    ran = dt.datetime(2026, 7, 21, 9, 0, tzinfo=dt.timezone.utc)
+    await repo.mark_digest_run(pool, chat.id, ran)
     await repo.mark_posted(pool, chat.id)
     await repo.mark_ping(pool, chat.id)
     fresh = (await repo.list_active_chats(pool))[0]
-    assert fresh.last_digest_date == dt.date(2026, 7, 21)
+    assert fresh.last_run_at == ran
     assert fresh.last_posted_at is not None
     assert fresh.last_ping_at is not None
 
