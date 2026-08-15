@@ -509,6 +509,53 @@ async def test_admin_summary_escapes_html(monkeypatch):
     assert "<тест>" not in text
 
 
+async def test_tick_suppresses_telegram_network_errors_into_daily_summary(monkeypatch):
+    """§11: транзиентная связь с Telegram не спамит admin сырым стектрейсом каждым
+    прогоном — вместо этого один понятный суточный итог. Первый раз (summary_at is None)
+    итог уходит сразу, дальше 24ч тишины."""
+    chat = make_chat()
+    monkeypatch.setattr(scheduler.repo, "list_active_chats", AsyncMock(return_value=[chat]))
+
+    async def fake_process_chat(deps_arg, chat_arg, now_arg):
+        return ["Молдова: прогон упал: TelegramNetworkError: Cannot connect to host "
+                "api.telegram.org:443"], False
+
+    monkeypatch.setattr(scheduler, "process_chat", fake_process_chat)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn, admin_chat_id=42)
+
+    now = dt.datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
+    await scheduler.tick(deps, now)
+
+    send_fn.assert_awaited_once()  # НЕ сырой стектрейс, а один понятный итог
+    text = send_fn.await_args.args[3]
+    assert "Telegram" in text and "не бот" in text
+    assert "TelegramNetworkError" not in text  # стектрейс наружу не идёт
+    assert deps.tg_net_pending == 0            # счётчик сброшен
+    assert deps.tg_net_summary_at == now
+
+
+async def test_tick_throttles_telegram_summary_within_24h(monkeypatch):
+    """В течение суток после итога новые сетевые ошибки Telegram только копятся, не шлются."""
+    chat = make_chat()
+    monkeypatch.setattr(scheduler.repo, "list_active_chats", AsyncMock(return_value=[chat]))
+
+    async def fake_process_chat(deps_arg, chat_arg, now_arg):
+        return ["Молдова: прогон упал: ClientConnectorError: Cannot connect to host "
+                "api.telegram.org:443"], False
+
+    monkeypatch.setattr(scheduler, "process_chat", fake_process_chat)
+    send_fn = AsyncMock(return_value=SendResult(ok=True))
+    deps = make_deps(send_fn, admin_chat_id=42)
+    now = dt.datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
+    deps.tg_net_summary_at = now - dt.timedelta(hours=1)  # итог был час назад
+
+    await scheduler.tick(deps, now)
+
+    send_fn.assert_not_awaited()        # рано для нового итога
+    assert deps.tg_net_pending == 1     # ошибка скопилась
+
+
 # --- Авто-подхват подзадач (фича 1, §7): дискавери внутри process_chat до сбора дельты ---
 
 
