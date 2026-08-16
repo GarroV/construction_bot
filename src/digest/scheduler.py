@@ -36,11 +36,11 @@ class Deps:
     overview_template: str = ""  # prompts/overview.txt (§5, «Отчёт по запросу»)
     send_fn: SendFn = field(default=send_html)
     bot_username: str = ""  # для строгой адресации команд в группах
-    # §11: агрегатор транзиентных сетевых ошибок Telegram — не спамим admin каждым
-    # прогоном, копим счётчик и шлём один суточный итог. In-memory (живёт в процессе);
-    # сброс при рестарте приемлем, сводка и так суточная.
-    tg_net_pending: int = 0
-    tg_net_summary_at: dt.datetime | None = None
+    # §11: агрегатор транзиентных сетевых ошибок (обрывы канала сервера — и к Telegram, и к
+    # Битриксу) — не спамим admin каждым прогоном, копим счётчик и шлём один суточный итог.
+    # In-memory (живёт в процессе); сброс при рестарте приемлем, сводка и так суточная.
+    net_pending: int = 0
+    net_summary_at: dt.datetime | None = None
     http: Any = None  # httpx.AsyncClient для download_attachment (§8) — тот же клиент, что у bx
 
 
@@ -411,19 +411,24 @@ async def _summarize_overview_or_none(deps, overview, lang, date_str, errors, ch
 
 
 # Классификация ошибок прогона для admin-сводки (§11): сырьё — строки errors (уже с
-# текстом), распознаём по маркерам, чтобы владелец сразу видел суть и не путал транзиентную
-# связь с Telegram с настоящим багом.
-_TG_NET_MARKERS = (
+# текстом), распознаём по маркерам, чтобы владелец сразу видел суть и не путал транзиентный
+# сетевой сбой с настоящим багом.
+_TRANSIENT_NET_MARKERS = (
+    # Telegram
     "api.telegram.org", "ClientConnectorError", "TelegramNetworkError",
     "ServerDisconnectedError", "Cannot connect to host",
+    # Битрикс/httpx (BitrixClient оборачивает httpx.HTTPError в BitrixError('TRANSPORT_ERROR'))
+    "TRANSPORT_ERROR", "All connection attempts failed",
+    "ConnectError", "ConnectTimeout", "ReadTimeout", "ConnectionReset",
 )
 
 
-def _is_telegram_network_error(msg: str) -> bool:
-    """Транзиентный сетевой сбой связи с Telegram (внешнее, не баг бота): бот ретраит,
-    дельта не теряется (курсор двигается только после успешной отправки). Такие в
-    admin-сводку каждым прогоном НЕ шлём — копим и отдаём одним суточным итогом."""
-    return any(m in msg for m in _TG_NET_MARKERS)
+def _is_transient_network_error(msg: str) -> bool:
+    """Транзиентный сетевой сбой канала сервера — обрыв связи с Telegram ИЛИ с Битриксом
+    (нестабильный аплинк muspelheim). Внешнее, не баг бота: бот ретраит, дельта не теряется
+    (курсор двигается только после успешной отправки). Такие в admin-сводку каждым прогоном
+    НЕ шлём — копим и отдаём одним суточным итогом, иначе плохой канал = нон-стоп спам."""
+    return any(m in msg for m in _TRANSIENT_NET_MARKERS)
 
 
 def _error_category(msg: str) -> str:
@@ -462,10 +467,10 @@ async def tick(deps: Deps, now_utc: dt.datetime | None = None) -> None:
             log.exception("прогон чата %s", chat.id)
             errors.append(f"{_chat_label(chat)}: прогон упал: {e}")
 
-    # Транзиентную связь с Telegram отделяем от настоящих багов: первую копим в суточный
-    # итог, вторые шлём сразу понятной сгруппированной сводкой.
-    real_errors = [e for e in errors if not _is_telegram_network_error(e)]
-    tg_net_count = len(errors) - len(real_errors)
+    # Транзиентные сетевые сбои (обрывы канала к Telegram/Битриксу) отделяем от настоящих
+    # багов: первые копим в суточный итог, вторые шлём сразу понятной сгруппированной сводкой.
+    real_errors = [e for e in errors if not _is_transient_network_error(e)]
+    net_count = len(errors) - len(real_errors)
 
     if real_errors and deps.settings.admin_chat_id:
         try:
@@ -474,19 +479,19 @@ async def tick(deps: Deps, now_utc: dt.datetime | None = None) -> None:
         except Exception:  # падение admin-сводки не должно ронять tick
             log.exception("не удалось отправить admin-сводку")
 
-    if tg_net_count:
-        deps.tg_net_pending += tg_net_count
-    if deps.tg_net_pending and deps.settings.admin_chat_id and (
-        deps.tg_net_summary_at is None
-        or (now_utc - deps.tg_net_summary_at) >= dt.timedelta(hours=24)
+    if net_count:
+        deps.net_pending += net_count
+    if deps.net_pending and deps.settings.admin_chat_id and (
+        deps.net_summary_at is None
+        or (now_utc - deps.net_summary_at) >= dt.timedelta(hours=24)
     ):
         try:
-            n = deps.tg_net_pending
-            text = (f"ℹ️ За сутки {n} прогон(ов) задержаны из-за нестабильной связи с "
-                    f"Telegram (внешняя проблема, не бот). Дельта не потеряна — уедет в "
-                    f"ближайший слот.")
+            n = deps.net_pending
+            text = (f"ℹ️ За сутки {n} обращени(й) сорвались из-за нестабильной сети сервера "
+                    f"(обрывы связи с Telegram/Битриксом — внешнее, не баг бота). Дельта не "
+                    f"потеряна, уедет в ближайший слот. Радикально лечится кабелем вместо Wi-Fi.")
             await deps.send_fn(deps.bot, deps.settings.admin_chat_id, None, render.clip(text))
-            deps.tg_net_pending = 0
-            deps.tg_net_summary_at = now_utc
+            deps.net_pending = 0
+            deps.net_summary_at = now_utc
         except Exception:  # не смогли отправить итог (та же связь) — счётчик копится дальше
-            log.exception("не удалось отправить суточную Telegram-сводку")
+            log.exception("не удалось отправить суточную сетевую сводку")
