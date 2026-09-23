@@ -1,6 +1,7 @@
 import asyncio
 import time
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -19,6 +20,13 @@ class BitrixError(Exception):
         super().__init__(f"{code}: {description}")
         self.code = code
         self.description = description
+
+
+def _same_origin(a: str, b: str) -> bool:
+    """Один и тот же портал: схема, хост и порт. Путь и query не сравниваем — антибот
+    редиректит на тот же url, а Битрикс может дописать хвост."""
+    x, y = urlsplit(a), urlsplit(b)
+    return (x.scheme, x.hostname, x.port) == (y.scheme, y.hostname, y.port)
 
 
 def _encode_params(params: dict | None) -> list[tuple[str, str]]:
@@ -66,18 +74,30 @@ class BitrixClient:
         return self._base
 
     async def call(self, method: str, params: dict | None = None) -> Any:
+        url = self._base + method + ".json"
+        query: list[tuple[str, str]] | None = _encode_params(params)
         for attempt in range(_MAX_ATTEMPTS):
             await self._wait_slot()
             try:
                 resp = await self._http.get(
-                    self._base + method + ".json",
-                    params=_encode_params(params),
+                    url,
+                    params=query,
                     headers={"User-Agent": _USER_AGENT},
                 )
             except httpx.HTTPError as e:  # сеть/таймаут — честный контракт (§ фикс №4):
                 raise BitrixError("TRANSPORT_ERROR", str(e)) from e  # вызывающие ловят только BitrixError
             if resp.status_code == 503:  # QUERY_LIMIT_EXCEEDED
                 await asyncio.sleep(2**attempt)
+                continue
+            if resp.is_redirect:  # cookie-challenge антибота Servicepipe (проверено 23.09.2026):
+                # 307 + тело "blank" + Set-Cookie + Location на тот же url = «возьми куку и
+                # повтори». Проходим его сами, а не httpx follow_redirects: в url лежит токен
+                # вебхука, и на чужой хост его уносить нельзя даже по валидному Location.
+                location = urljoin(str(resp.url), resp.headers.get("location", ""))
+                if not _same_origin(location, self._base):
+                    host = urlsplit(location).netloc or "?"  # без пути: он мог бы унести токен в текст ошибки
+                    raise BitrixError(f"HTTP_{resp.status_code}", f"редирект на чужой хост {host}")
+                url, query = location, None  # параметры уже внутри Location
                 continue
             if not (200 <= resp.status_code < 300):
                 raise BitrixError(f"HTTP_{resp.status_code}", resp.text[:200])
