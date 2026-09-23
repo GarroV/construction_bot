@@ -207,6 +207,29 @@ src.main`) и `postgres` (с healthcheck и лейблом `backup.pgdump=true` 
 MUSPELHEIM). При старте `src/main.py` сам накатывает недостающие миграции из `migrations/` перед
 тем как поднять polling и планировщик — отдельного шага миграции руками не требуется.
 
+### Раскатка на MUSPELHEIM
+
+Бот живёт контейнером на домашнем сервере (`C:\projects\construction_bot`), раскатка — ручная:
+
+```powershell
+cd C:\projects\construction_bot
+git pull --ff-only
+docker compose up -d --build bot
+```
+
+**Проверять, что раскатка доехала, обязательно — молчаливый провал уже случался.** 23.09.2026
+`git pull` падал на несуществующем SSH-алиасе в `origin` (`git@github-construction:…`, записи
+`Host` для него в `~/.ssh/config` сервера нет), но `docker compose up --build` после него
+отрабатывал успешно и **пересобирал образ из старого кода** — контейнер выглядел свежим,
+фикса в нём не было. Remote переключён на `git@github.com:GarroV/construction_bot.git`.
+
+Две сверки после каждой раскатки — по факту, а не по успешному виду команд:
+
+```powershell
+git rev-parse --short HEAD          # должен совпасть с origin/main
+docker exec construction_bot-bot-1 grep -c <маркер фикса> /app/src/<файл>
+```
+
 ### Смоук-скрипт Битрикса
 
 `scripts/smoke_bitrix.py` — разовая проверка вебхука по живой карточке (историю задачи, сообщения
