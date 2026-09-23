@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import httpx
+import pytest
 import respx
 
 from src.bitrix import methods
@@ -10,9 +11,18 @@ from src.bitrix.client import BitrixClient
 
 BASE = "https://portal.bitrix24.ru/rest/123/abc/"
 
-_LIVE_CHECKLIST = json.loads(
-    Path("tests/fixtures/live/checklist.json").read_text()
-)
+LIVE_CHECKLIST_PATH = Path(__file__).parent / "fixtures" / "live" / "checklist.json"
+
+
+@pytest.fixture
+def live_checklist():
+    """Живой дамп чек-листа из Битрикс24. В репозиторий не коммитится (реальные
+    данные, `.gitignore`), поэтому есть не на всякой машине. Где его нет — тест
+    пропускается; читать дамп на уровне модуля нельзя, иначе его отсутствие роняет
+    сбор всего набора, а не один тест."""
+    if not LIVE_CHECKLIST_PATH.exists():
+        pytest.skip(f"нет {LIVE_CHECKLIST_PATH.name} — живой дамп не коммитится")
+    return json.loads(LIVE_CHECKLIST_PATH.read_text())
 
 
 def _item(id_, parent_id, title, sort_index, complete):
@@ -101,12 +111,12 @@ async def test_checklist_summary_garbage_sort_index_does_not_crash():
     assert summary.stage_title == "01 Stage one"  # garbage -> 0, сортируется первым
 
 
-async def test_checklist_summary_on_live_fixture():
+async def test_checklist_summary_on_live_fixture(live_checklist):
     """Живой пример (71 пункт, 7 этапов «01 …»–«07 …»): все 7 корней имеют детей и у
     каждого корня все дети выполнены (сами корневые галочки при этом не проставлены у
     6 из 7) -> «все этапы закрыты», done/total считаются по всем 71 пункту."""
     bx = AsyncMock()
-    bx.call = AsyncMock(return_value=_LIVE_CHECKLIST)
+    bx.call = AsyncMock(return_value=live_checklist)
 
     summary = await methods.get_checklist_summary(bx, 42103)
 
